@@ -14,9 +14,12 @@ class SendItClient {
         this.onTransferError = null;
         this.onFilesReceived = null;
         this.onPeersUpdated = null;
+        this.onTransferRequest = null; // Nowy callback dla żądań transferu
         this.connectionRetryCount = 0;
         this.maxConnectionRetries = 3;
-        this.useFallbackIceServers = false; // Flaga do awaryjnego trybu
+        this.useFallbackIceServers = false;
+        this.isConnecting = {}; // Śledzenie stanu łączenia dla każdego ID peera
+        this.pendingTransfers = {}; // Śledzenie oczekujących transferów
     }
 
     // Inicjalizacja połączenia z serwerem sygnalizacyjnym
@@ -69,9 +72,17 @@ class SendItClient {
                     
                     // Zamknij wszystkie istniejące połączenia z tym peerem
                     if (this.activeConnections[peerId]) {
-                        this.activeConnections[peerId].close();
+                        try {
+                            this.activeConnections[peerId].destroy();
+                        } catch (err) {
+                            console.error('Błąd podczas zamykania połączenia:', err);
+                        }
                         delete this.activeConnections[peerId];
+                        delete this.isConnecting[peerId];
                     }
+                    
+                    // Usuń oczekujące transfery
+                    delete this.pendingTransfers[peerId];
                     
                     if (this.onPeerDisconnected && peer) {
                         this.onPeerDisconnected(peer);
@@ -87,13 +98,29 @@ class SendItClient {
                     try {
                         console.log(`Otrzymano sygnał od ${peerId}:`, signal.type || 'unknown');
                         
-                        if (!this.activeConnections[peerId]) {
-                            await this.createPeerConnection(peerId, false);
+                        // Sprawdź czy połączenie już istnieje lub jest w trakcie tworzenia
+                        if (!this.activeConnections[peerId] && !this.isConnecting[peerId]) {
+                            // Oznacz, że rozpoczęto łączenie
+                            this.isConnecting[peerId] = true;
+                            try {
+                                await this.createPeerConnection(peerId, false);
+                            } catch (error) {
+                                console.error('Błąd podczas tworzenia połączenia po otrzymaniu sygnału:', error);
+                                delete this.isConnecting[peerId];
+                                return;
+                            }
                         }
                         
-                        await this.activeConnections[peerId].signal(signal);
+                        // Zabezpieczenie przed przypadkiem, gdy połączenie mogło zostać usunięte w międzyczasie
+                        if (this.activeConnections[peerId]) {
+                            await this.activeConnections[peerId].signal(signal);
+                        } else {
+                            console.warn(`Nie można przetworzyć sygnału dla ${peerId} - brak połączenia`);
+                        }
                     } catch (error) {
                         console.error('Błąd podczas przetwarzania sygnału:', error);
+                        // Usuń znacznik tworzenia połączenia w przypadku błędu
+                        delete this.isConnecting[peerId];
                     }
                 });
                 
@@ -163,6 +190,9 @@ class SendItClient {
         try {
             console.log(`Tworzenie połączenia peer z ${targetPeerId}, initiator: ${isInitiator}`);
             
+            // Oznacz, że rozpoczęto łączenie
+            this.isConnecting[targetPeerId] = true;
+            
             // Pobierz konfigurację ICE serwerów
             const iceServers = await this.getIceServers();
             
@@ -197,10 +227,14 @@ class SendItClient {
             
             peer.on('signal', (data) => {
                 console.log(`Wysyłanie sygnału do ${targetPeerId}:`, data.type || 'unknown');
-                this.socket.emit('signal', {
-                    peerId: targetPeerId,
-                    signal: data
-                });
+                if (this.socket && this.socket.connected) {
+                    this.socket.emit('signal', {
+                        peerId: targetPeerId,
+                        signal: data
+                    });
+                } else {
+                    console.error('Nie można wysłać sygnału - socket jest null lub rozłączony');
+                }
             });
             
             peer.on('error', (err) => {
@@ -216,12 +250,7 @@ class SendItClient {
                     this.connectionRetryCount = 0;
                     
                     // Usuń obecne połączenie
-                    delete this.activeConnections[targetPeerId];
-                    
-                    // Zniszcz obiekt peer
-                    if (peer && typeof peer.destroy === 'function') {
-                        peer.destroy();
-                    }
+                    this.cleanupConnection(targetPeerId, peer);
                     
                     // Spróbuj ponownie z awaryjnymi serwerami
                     setTimeout(() => {
@@ -231,6 +260,7 @@ class SendItClient {
                             if (this.onTransferError) {
                                 this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia nawet z awaryjnymi serwerami.');
                             }
+                            delete this.isConnecting[targetPeerId];
                         });
                     }, 1000);
                     
@@ -243,12 +273,7 @@ class SendItClient {
                     this.connectionRetryCount++;
                     
                     // Usuń obecne połączenie i utwórz nowe
-                    delete this.activeConnections[targetPeerId];
-                    
-                    // Zniszcz obiekt peer
-                    if (peer && typeof peer.destroy === 'function') {
-                        peer.destroy();
-                    }
+                    this.cleanupConnection(targetPeerId, peer);
                     
                     // Oczekuj chwilę przed ponowną próbą
                     setTimeout(() => {
@@ -258,11 +283,13 @@ class SendItClient {
                             if (this.onTransferError) {
                                 this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia po kilku próbach.');
                             }
+                            delete this.isConnecting[targetPeerId];
                         });
                     }, 1000);
                 } else {
                     // Powiadom o błędzie po wyczerpaniu prób
                     this.connectionRetryCount = 0;
+                    delete this.isConnecting[targetPeerId];
                     if (this.onTransferError) {
                         this.onTransferError(targetPeerId, err.message);
                     }
@@ -274,6 +301,7 @@ class SendItClient {
                 // Resetuj licznik prób po udanym połączeniu
                 this.connectionRetryCount = 0;
                 this.useFallbackIceServers = false; // Resetuj flagę awaryjną
+                delete this.isConnecting[targetPeerId]; // Usuń znacznik nawiązywania połączenia
             });
             
             peer.on('data', (data) => {
@@ -282,7 +310,7 @@ class SendItClient {
             
             peer.on('close', () => {
                 console.log(`Zamknięto połączenie z peerem: ${targetPeerId}`);
-                delete this.activeConnections[targetPeerId];
+                this.cleanupConnection(targetPeerId);
             });
             
             // Dodatkowe monitorowanie stanu ICE
@@ -313,14 +341,24 @@ class SendItClient {
                 
                 peer._pc.addEventListener('connectionstatechange', () => {
                     console.log(`Zmiana stanu połączenia dla ${targetPeerId}:`, peer._pc.connectionState);
+                    
+                    // Reaguj na stan "failed" lub "disconnected"
+                    if (peer._pc.connectionState === 'failed' || peer._pc.connectionState === 'disconnected') {
+                        console.error(`Połączenie WebRTC ${peer._pc.connectionState} dla ${targetPeerId}`);
+                        if (this.onTransferError) {
+                            this.onTransferError(targetPeerId, `Połączenie WebRTC ${peer._pc.connectionState}`);
+                        }
+                    }
                 });
             }
             
+            // Ustaw połączenie jako aktywne
             this.activeConnections[targetPeerId] = peer;
             return peer;
             
         } catch (error) {
             console.error(`Błąd podczas tworzenia połączenia peer z ${targetPeerId}:`, error);
+            delete this.isConnecting[targetPeerId]; // Usuń znacznik nawiązywania połączenia
             if (this.onTransferError) {
                 this.onTransferError(targetPeerId, `Błąd konfiguracji: ${error.message}`);
             }
@@ -328,75 +366,180 @@ class SendItClient {
         }
     }
 
-    // Wysłanie plików do określonego peera
-    async sendFiles(targetPeerId, files) {
+    // Procedura czyszczenia połączenia
+    cleanupConnection(targetPeerId, peerObject = null) {
+        const peer = peerObject || this.activeConnections[targetPeerId];
+        
+        // Bezpiecznie zniszcz obiekt peer jeśli istnieje
+        if (peer && typeof peer.destroy === 'function') {
+            try {
+                peer.destroy();
+            } catch (err) {
+                console.error('Błąd podczas niszczenia obiektu peer:', err);
+            }
+        }
+        
+        // Usuń z listy aktywnych połączeń
+        delete this.activeConnections[targetPeerId];
+    }
+
+    // Sprawdzenie czy połączenie jest gotowe
+    isConnectionReady(targetPeerId) {
+        return !!(this.activeConnections[targetPeerId] && 
+                 !this.isConnecting[targetPeerId] &&
+                 this.activeConnections[targetPeerId]._connected);
+    }
+
+    // Wysłanie żądania transferu plików
+    async requestFileTransfer(targetPeerId, files) {
         try {
-            console.log(`Rozpoczynam wysyłanie ${files.length} plików do ${targetPeerId}`);
-            let connection = this.activeConnections[targetPeerId];
+            console.log(`Wysyłanie żądania transferu ${files.length} plików do ${targetPeerId}`);
             
-            if (!connection) {
-                console.log(`Brak aktywnego połączenia z ${targetPeerId}, tworzę nowe połączenie`);
+            // Sprawdź, czy jest aktywne połączenie i czy jest gotowe
+            let connection = this.activeConnections[targetPeerId];
+            let needNewConnection = !this.isConnectionReady(targetPeerId);
+            
+            if (needNewConnection) {
+                console.log(`Brak aktywnego gotowego połączenia z ${targetPeerId}, tworzę nowe połączenie`);
+                
+                // Wyczyść poprzednie połączenie, jeśli istnieje
+                if (connection) {
+                    this.cleanupConnection(targetPeerId, connection);
+                }
+                
+                // Utwórz nowe połączenie
                 connection = await this.createPeerConnection(targetPeerId, true);
                 
-                // Poczekaj na nawiązanie połączenia
+                // Poczekaj na nawiązanie połączenia z timeoutem
                 await new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => {
-                        reject(new Error('Przekroczono czas oczekiwania na połączenie'));
-                    }, 30000);
+                    let connectionTimeout;
                     
-                    // Utworzenie funkcji obsługi zdarzeń, które zostaną usunięte po zakończeniu
+                    // Funkcja obsługi połączenia
                     const connectHandler = () => {
-                        clearTimeout(timeout);
+                        console.log(`Pomyślnie nawiązano połączenie z ${targetPeerId}`);
+                        clearTimeout(connectionTimeout);
+                        connection.removeListener('connect', connectHandler);
+                        connection.removeListener('error', errorHandler);
                         resolve();
                     };
                     
+                    // Funkcja obsługi błędu
                     const errorHandler = (err) => {
-                        clearTimeout(timeout);
+                        console.error(`Błąd podczas nawiązywania połączenia z ${targetPeerId}:`, err);
+                        clearTimeout(connectionTimeout);
+                        connection.removeListener('connect', connectHandler);
+                        connection.removeListener('error', errorHandler);
                         reject(err);
                     };
                     
-                    connection.once('connect', connectHandler);
-                    connection.once('error', errorHandler);
-                    
-                    // Obsługa czyszczenia po zakończeniu
-                    setTimeout(() => {
+                    // Ustaw timeout
+                    connectionTimeout = setTimeout(() => {
                         connection.removeListener('connect', connectHandler);
                         connection.removeListener('error', errorHandler);
+                        reject(new Error('Przekroczono czas oczekiwania na połączenie'));
                     }, 30000);
+                    
+                    // Dodaj obserwatory zdarzeń
+                    connection.once('connect', connectHandler);
+                    connection.once('error', errorHandler);
                 });
             }
             
-            console.log(`Połączenie ustanowione, przygotowuję metadane dla ${files.length} plików`);
+            // Zabezpieczenie - sprawdź, czy połączenie jest wciąż aktywne
+            if (!this.activeConnections[targetPeerId]) {
+                throw new Error('Połączenie zostało zamknięte w trakcie procesu nawiązywania');
+            }
             
-            // Przygotowanie metadanych o plikach
+            connection = this.activeConnections[targetPeerId];
+            
+            // Kolejne zabezpieczenie - sprawdź, czy połączenie posiada metodę send
+            if (!connection.send || typeof connection.send !== 'function') {
+                throw new Error('Połączenie nie obsługuje metody wysyłania danych');
+            }
+            
+            // Przygotowanie żądania transferu plików
             const filesMetadata = Array.from(files).map(file => ({
                 name: file.name,
                 type: file.type,
                 size: file.size
             }));
             
-            // Wysłanie metadanych
+            const totalSize = filesMetadata.reduce((sum, file) => sum + file.size, 0);
+            
+            try {
+                // Wyślij żądanie transferu plików
+                connection.send(JSON.stringify({
+                    type: 'request-transfer',
+                    files: filesMetadata,
+                    totalSize: totalSize,
+                    senderName: this.deviceName
+                }));
+                
+                console.log(`Wysłano żądanie transferu plików do ${targetPeerId}`);
+                
+                // Zapisz pliki do tymczasowej kolejki oczekując na odpowiedź
+                this.pendingTransfers[targetPeerId] = {
+                    files: files,
+                    timestamp: Date.now()
+                };
+                
+                // Rozpocznij timeout dla oczekiwania na odpowiedź (30 sekund)
+                setTimeout(() => {
+                    if (this.pendingTransfers[targetPeerId]) {
+                        console.log(`Timeout oczekiwania na odpowiedź od ${targetPeerId}`);
+                        delete this.pendingTransfers[targetPeerId];
+                        if (this.onTransferError) {
+                            this.onTransferError(targetPeerId, 'Nie otrzymano odpowiedzi na żądanie transferu');
+                        }
+                    }
+                }, 30000);
+                
+                return true;
+            } catch (error) {
+                console.error('Błąd podczas wysyłania żądania transferu:', error);
+                throw new Error('Błąd podczas wysyłania żądania transferu: ' + error.message);
+            }
+        } catch (error) {
+            console.error('Błąd podczas przygotowania żądania transferu plików:', error);
+            if (this.onTransferError) {
+                this.onTransferError(targetPeerId, error.message);
+            }
+            throw error;
+        }
+    }
+    
+    // Odpowiedź na żądanie transferu plików
+    respondToTransferRequest(peerId, accepted) {
+        try {
+            if (!this.isConnectionReady(peerId)) {
+                throw new Error('Brak aktywnego połączenia z peerem');
+            }
+            
+            const connection = this.activeConnections[peerId];
+            
             connection.send(JSON.stringify({
-                type: 'metadata',
-                files: filesMetadata
+                type: accepted ? 'accept-transfer' : 'reject-transfer'
             }));
             
-            console.log('Metadane wysłane, dodaję pliki do kolejki transferu');
-            
-            // Dodanie plików do kolejki transferu
-            Array.from(files).forEach(file => {
-                this.transferQueue.push({
-                    peerId: targetPeerId,
-                    file,
-                    progress: 0
-                });
-            });
-            
-            // Rozpoczęcie transferu, jeśli nie jest aktywny
-            if (!this.currentTransfer) {
-                console.log('Rozpoczynam transfer plików z kolejki');
-                this.processNextTransfer();
+            console.log(`Wysłano ${accepted ? 'akceptację' : 'odrzucenie'} transferu do ${peerId}`);
+            return true;
+        } catch (error) {
+            console.error('Błąd podczas odpowiadania na żądanie transferu:', error);
+            if (this.onTransferError) {
+                this.onTransferError(peerId, error.message);
             }
+            return false;
+        }
+    }
+
+    // Wysłanie plików do określonego peera
+    async sendFiles(targetPeerId, files) {
+        try {
+            // Najpierw wyślij żądanie transferu
+            await this.requestFileTransfer(targetPeerId, files);
+            
+            // Faktyczny transfer plików zostanie rozpoczęty po otrzymaniu akceptacji
+            // Obsługa w handleIncomingData dla wiadomości 'accept-transfer'
             
             return true;
         } catch (error) {
@@ -422,10 +565,12 @@ class SendItClient {
         console.log(`Rozpoczynam transfer pliku "${file.name}" (${this.formatFileSize(file.size)}) do ${peerId}`);
         
         try {
-            const connection = this.activeConnections[peerId];
-            if (!connection) {
-                throw new Error('Brak połączenia z peerem');
+            // Sprawdź, czy połączenie istnieje i jest gotowe
+            if (!this.isConnectionReady(peerId)) {
+                throw new Error('Brak aktywnego połączenia z peerem');
             }
+            
+            const connection = this.activeConnections[peerId];
             
             // Rozpocznij transfer pliku
             const chunkSize = 16384; // 16KB chunks
@@ -435,58 +580,81 @@ class SendItClient {
             let lastOffset = 0;
             
             // Informacja o rozpoczęciu transferu
-            connection.send(JSON.stringify({
-                type: 'start-file',
-                name: file.name,
-                size: file.size,
-                type: file.type
-            }));
+            try {
+                connection.send(JSON.stringify({
+                    type: 'start-file',
+                    name: file.name,
+                    size: file.size,
+                    type: file.type
+                }));
+            } catch (error) {
+                console.error('Błąd podczas wysyłania informacji o rozpoczęciu transferu:', error);
+                throw new Error('Błąd podczas wysyłania informacji o rozpoczęciu transferu: ' + error.message);
+            }
             
             const readNextChunk = () => {
+                // Sprawdź, czy połączenie jest wciąż aktywne
+                if (!this.isConnectionReady(peerId)) {
+                    throw new Error('Połączenie zostało zamknięte w trakcie transferu');
+                }
+                
                 const slice = file.slice(offset, offset + chunkSize);
                 reader.readAsArrayBuffer(slice);
             };
             
             reader.onload = (e) => {
-                const chunk = e.target.result;
-                
-                // Wysłanie fragmentu danych
-                connection.send(chunk);
-                
-                offset += chunk.byteLength;
-                const progress = Math.min(100, Math.floor((offset / file.size) * 100));
-                
-                // Obliczenie prędkości transferu
-                const now = Date.now();
-                const timeDiff = now - lastUpdateTime;
-                if (timeDiff > 500) { // Aktualizuj co pół sekundy
-                    const bytesPerSecond = ((offset - lastOffset) / timeDiff) * 1000;
-                    lastUpdateTime = now;
-                    lastOffset = offset;
-                    
-                    // Aktualizacja postępu
-                    if (this.onTransferProgress) {
-                        this.onTransferProgress(peerId, file, progress, offset, false, bytesPerSecond);
-                    }
-                }
-                
-                if (offset < file.size) {
-                    // Odczytaj kolejny fragment
-                    readNextChunk();
-                } else {
-                    console.log(`Transfer pliku "${file.name}" zakończony`);
-                    
-                    // Zakończenie transferu tego pliku
-                    connection.send(JSON.stringify({
-                        type: 'end-file',
-                        name: file.name
-                    }));
-                    
-                    if (this.onTransferComplete) {
-                        this.onTransferComplete(peerId, file);
+                try {
+                    // Sprawdź, czy połączenie jest wciąż aktywne
+                    if (!this.isConnectionReady(peerId)) {
+                        throw new Error('Połączenie zostało zamknięte w trakcie transferu');
                     }
                     
-                    // Przejdź do kolejnego pliku w kolejce
+                    const chunk = e.target.result;
+                    
+                    // Wysłanie fragmentu danych
+                    connection.send(chunk);
+                    
+                    offset += chunk.byteLength;
+                    const progress = Math.min(100, Math.floor((offset / file.size) * 100));
+                    
+                    // Obliczenie prędkości transferu
+                    const now = Date.now();
+                    const timeDiff = now - lastUpdateTime;
+                    if (timeDiff > 500) { // Aktualizuj co pół sekundy
+                        const bytesPerSecond = ((offset - lastOffset) / timeDiff) * 1000;
+                        lastUpdateTime = now;
+                        lastOffset = offset;
+                        
+                        // Aktualizacja postępu
+                        if (this.onTransferProgress) {
+                            this.onTransferProgress(peerId, file, progress, offset, false, bytesPerSecond);
+                        }
+                    }
+                    
+                    if (offset < file.size) {
+                        // Odczytaj kolejny fragment
+                        readNextChunk();
+                    } else {
+                        console.log(`Transfer pliku "${file.name}" zakończony`);
+                        
+                        // Zakończenie transferu tego pliku
+                        connection.send(JSON.stringify({
+                            type: 'end-file',
+                            name: file.name
+                        }));
+                        
+                        if (this.onTransferComplete) {
+                            this.onTransferComplete(peerId, file);
+                        }
+                        
+                        // Przejdź do kolejnego pliku w kolejce
+                        this.processNextTransfer();
+                    }
+                } catch (error) {
+                    console.error('Błąd podczas wysyłania danych:', error);
+                    if (this.onTransferError) {
+                        this.onTransferError(peerId, 'Błąd podczas wysyłania danych: ' + error.message);
+                    }
                     this.processNextTransfer();
                 }
             };
@@ -508,6 +676,34 @@ class SendItClient {
                 this.onTransferError(peerId, error.message);
             }
             this.processNextTransfer();
+        }
+    }
+
+    // Anulowanie transferu (można wywołać z UI)
+    cancelTransfer(peerId) {
+        console.log(`Anulowanie transferu dla ${peerId}`);
+        
+        try {
+            if (this.isConnectionReady(peerId)) {
+                // Wyślij wiadomość o anulowaniu transferu
+                this.activeConnections[peerId].send(JSON.stringify({
+                    type: 'cancel-transfer'
+                }));
+            }
+            
+            // Usuń wszystkie transfery dla tego peera z kolejki
+            this.transferQueue = this.transferQueue.filter(item => item.peerId !== peerId);
+            
+            // Jeśli bieżący transfer jest dla tego peera, przejdź do następnego
+            if (this.currentTransfer && this.currentTransfer.peerId === peerId) {
+                this.currentTransfer = null;
+                this.processNextTransfer();
+            }
+            
+            return true;
+        } catch (error) {
+            console.error('Błąd podczas anulowania transferu:', error);
+            return false;
         }
     }
 
@@ -560,6 +756,91 @@ class SendItClient {
                 console.log(`Otrzymano wiadomość typu ${message.type} od ${peerId}`);
                 
                 switch (message.type) {
+                    case 'request-transfer':
+                        // Otrzymano żądanie transferu plików
+                        console.log(`Otrzymano żądanie transferu ${message.files.length} plików od ${peerId}`);
+                        
+                        const peerName = this.peers[peerId]?.name || "Nieznane urządzenie";
+                        
+                        // Powiadom UI o żądaniu transferu
+                        if (this.onTransferRequest) {
+                            this.onTransferRequest(peerId, {
+                                files: message.files,
+                                totalSize: message.totalSize,
+                                senderName: message.senderName || peerName
+                            });
+                        }
+                        break;
+                        
+                    case 'accept-transfer':
+                        // Transfer został zaakceptowany - rozpocznij wysyłanie
+                        console.log(`Transfer został zaakceptowany przez ${peerId}`);
+                        
+                        // Sprawdź, czy mamy oczekujące pliki dla tego peera
+                        if (this.pendingTransfers[peerId]) {
+                            const { files } = this.pendingTransfers[peerId];
+                            delete this.pendingTransfers[peerId];
+                            
+                            // Dodaj pliki do kolejki transferu
+                            Array.from(files).forEach(file => {
+                                this.transferQueue.push({
+                                    peerId: peerId,
+                                    file,
+                                    progress: 0
+                                });
+                            });
+                            
+                            // Przygotowanie metadanych o plikach
+                            const filesMetadata = Array.from(files).map(file => ({
+                                name: file.name,
+                                type: file.type,
+                                size: file.size
+                            }));
+                            
+                            // Wyślij metadane
+                            const connection = this.activeConnections[peerId];
+                            connection.send(JSON.stringify({
+                                type: 'metadata',
+                                files: filesMetadata
+                            }));
+                            
+                            // Rozpocznij transfer, jeśli nie jest aktywny
+                            if (!this.currentTransfer) {
+                                this.processNextTransfer();
+                            }
+                        } else {
+                            console.warn(`Otrzymano akceptację transferu, ale nie ma oczekujących plików dla ${peerId}`);
+                        }
+                        break;
+                        
+                    case 'reject-transfer':
+                        // Transfer został odrzucony
+                        console.log(`Transfer został odrzucony przez ${peerId}`);
+                        
+                        // Usuń oczekujące pliki dla tego peera
+                        delete this.pendingTransfers[peerId];
+                        
+                        // Powiadom UI o odrzuceniu
+                        if (this.onTransferError) {
+                            this.onTransferError(peerId, 'Transfer został odrzucony przez odbiorcę');
+                        }
+                        break;
+                        
+                    case 'cancel-transfer':
+                        // Transfer został anulowany przez drugą stronę
+                        console.log(`Transfer został anulowany przez ${peerId}`);
+                        
+                        // Wyczyść bieżący odbierany plik
+                        this.currentReceivingFile = null;
+                        this.incomingFiles = null;
+                        this.receivedFiles = [];
+                        
+                        // Powiadom UI o anulowaniu
+                        if (this.onTransferError) {
+                            this.onTransferError(peerId, 'Transfer został anulowany przez nadawcę');
+                        }
+                        break;
+                        
                     case 'metadata':
                         // Otrzymano informacje o plikach, które będą przesłane
                         console.log(`Początek odbierania ${message.files.length} plików`);
@@ -636,11 +917,13 @@ class SendItClient {
     // Zamknięcie wszystkich połączeń
     disconnect() {
         console.log('Zamykanie wszystkich połączeń');
-        Object.values(this.activeConnections).forEach(connection => {
-            connection.destroy();
+        Object.keys(this.activeConnections).forEach(peerId => {
+            this.cleanupConnection(peerId);
         });
         
         this.activeConnections = {};
+        this.isConnecting = {};
+        this.pendingTransfers = {};
         
         if (this.socket) {
             this.socket.disconnect();
