@@ -3,6 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const os = require('os');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const app = express();
 const server = http.createServer(app);
@@ -10,6 +11,27 @@ const io = new Server(server);
 
 // Serwowanie plików statycznych
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Endpoint do pobierania poświadczeń TURN
+app.get('/api/turn-credentials', async (req, res) => {
+  try {
+    // Pobieranie tymczasowych poświadczeń z serwera Metered
+    const response = await fetch(
+      "https://owoc.metered.live/api/v1/turn/credentials?apiKey=606e2f3b5aabd4c33e1b5c5cce474f2b17f8"
+    );
+    
+    if (!response.ok) {
+      throw new Error('Błąd podczas pobierania poświadczeń TURN');
+    }
+    
+    // Przekazanie poświadczeń do klienta
+    const credentials = await response.json();
+    res.json(credentials);
+  } catch (error) {
+    console.error('Błąd pobierania poświadczeń TURN:', error);
+    res.status(500).json({ error: 'Nie udało się pobrać poświadczeń TURN' });
+  }
+});
 
 // Mapowanie aktywnych gniazd (socket) do identyfikatorów urządzeń
 // Organizacja: peers[networkId][socketId] = {id, name}
