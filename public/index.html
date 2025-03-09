@@ -514,6 +514,55 @@
             pointer-events: none;
         }
 
+        /* Style menu kontekstowego */
+        .context-menu {
+            position: absolute;
+            background-color: var(--glass-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 0.8rem;
+            box-shadow: 0 5px 20px var(--shadow-color);
+            z-index: 1000;
+            animation: contextFadeIn 0.2s ease-out;
+            overflow: hidden;
+        }
+
+        .context-menu-item {
+            padding: 0.8rem 1.2rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: var(--dark-text);
+            display: flex;
+            align-items: center;
+            font-size: 0.9rem;
+        }
+
+        .context-menu-item:hover {
+            background-color: rgba(0, 113, 227, 0.1);
+        }
+
+        .context-menu-item i {
+            margin-right: 0.5rem;
+            font-size: 1.1rem;
+            color: var(--primary-color);
+        }
+
+        .context-menu-separator {
+            height: 1px;
+            background-color: rgba(0, 0, 0, 0.1);
+            margin: 0.3rem 0;
+        }
+
+        @keyframes contextFadeIn {
+            from {
+                opacity: 0;
+                transform: scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
         @media (max-width: 768px) {
             .devices-container {
                 flex-direction: column;
@@ -1252,6 +1301,204 @@
                 showToast('Witaj w SendIt', 'Udostępniaj pliki bezpośrednio w swojej sieci WiFi', 'info');
             }, 500);
         });
+
+        // Funkcja do diagnostyki WebRTC i połączeń
+        async function runWebRTCDiagnostics() {
+            showToast('Diagnostyka WebRTC', 'Rozpoczęcie testów diagnostycznych...', 'info');
+            
+            try {
+                const results = await client.diagnoseWebRTC();
+                
+                // Tworzenie raportu diagnostycznego
+                let report = `
+                    <h3>Raport diagnostyczny WebRTC</h3>
+                    <h4>Wsparcie przeglądarki:</h4>
+                    <ul>
+                        <li>RTCPeerConnection: ${results.browserSupport.rtcPeerConnection ? '✅' : '❌'}</li>
+                        <li>getUserMedia: ${results.browserSupport.getUserMedia ? '✅' : '❌'}</li>
+                        <li>SimplePeer: ${results.browserSupport.simplePeer ? '✅' : '❌'}</li>
+                    </ul>
+                    
+                    <h4>Połączenie z serwerem:</h4>
+                    <ul>
+                        <li>Socket.IO połączony: ${results.connectionTests.socketConnection ? '✅' : '❌'}</li>
+                        <li>Czas pobierania konfiguracji ICE: ${results.connectionTests.timeToConnect || 'N/A'} ms</li>
+                        <li>ID sieci: ${results.networkInfo.networkId || 'N/A'}</li>
+                    </ul>
+                    
+                    <h4>Serwery ICE (${results.iceServers.length}):</h4>
+                    <ul>
+                        ${results.iceServers.map(server => `
+                            <li>${server.urls} ${server.hasCredentials ? '(z poświadczeniami)' : ''}</li>
+                        `).join('')}
+                    </ul>
+                    
+                    <h4>Kandydaci ICE:</h4>
+                    <ul>
+                        ${results.iceCandidates ? results.iceCandidates.map(candidate => `
+                            <li>Typ: ${candidate.type}, Protokół: ${candidate.protocol}, Adres: ${candidate.address || 'N/A'}</li>
+                        `).join('') : 'Nie znaleziono kandydatów ICE'}
+                    </ul>
+                `;
+                
+                // Wyświetl raport w oknie dialogowym
+                const diagnosticModal = document.createElement('div');
+                diagnosticModal.className = 'transfer-container active';
+                diagnosticModal.innerHTML = `
+                    <div class="transfer-panel" style="width: 80%; max-width: 800px; max-height: 80vh; overflow-y: auto; text-align: left;">
+                        <div class="transfer-icon">🔍</div>
+                        <div class="transfer-title">Diagnostyka WebRTC</div>
+                        <div style="margin: 20px 0; overflow-y: auto;">
+                            ${report}
+                        </div>
+                        <div class="transfer-actions">
+                            <button id="close-diagnostic" class="reject-btn">Zamknij</button>
+                        </div>
+                    </div>
+                `;
+                
+                document.body.appendChild(diagnosticModal);
+                
+                document.getElementById('close-diagnostic').addEventListener('click', () => {
+                    document.body.removeChild(diagnosticModal);
+                });
+                
+                showToast('Diagnostyka zakończona', 'Testy WebRTC zakończone pomyślnie', 'success');
+            } catch (error) {
+                console.error('[BŁĄD] Błąd podczas diagnostyki WebRTC:', error);
+                showToast('Błąd diagnostyki', error.message, 'error');
+            }
+        }
+
+        // Dodaj przycisk diagnostyki do interfejsu
+        function addDiagnosticButton() {
+            const selfDevice = document.querySelector('.self-device');
+            if (!selfDevice) return;
+            
+            const diagnosticBtn = document.createElement('button');
+            diagnosticBtn.className = 'upload-btn';
+            diagnosticBtn.id = 'diagnostic-btn';
+            diagnosticBtn.style.marginTop = '10px';
+            diagnosticBtn.style.backgroundColor = '#4a6fa5';
+            diagnosticBtn.textContent = 'Diagnostyka WebRTC';
+            
+            selfDevice.appendChild(diagnosticBtn);
+            
+            diagnosticBtn.addEventListener('click', runWebRTCDiagnostics);
+        }
+
+        // Dodaj przycisk po inicjalizacji aplikacji
+        document.addEventListener('DOMContentLoaded', () => {
+            // Poczekaj na załadowanie aplikacji
+            setTimeout(addDiagnosticButton, 1000);
+        });
+
+        // Funkcja do testowania połączenia z konkretnym peerem
+        async function testPeerConnection(peerId) {
+            showToast('Test połączenia', `Testowanie połączenia z ${peerId}...`, 'info');
+            
+            try {
+                const results = await client.testConnection(peerId);
+                
+                if (results.success) {
+                    showToast('Test połączenia', `Połączenie udane, czas: ${results.timeTaken}ms`, 'success');
+                } else {
+                    showToast('Test połączenia', `Błąd połączenia: ${results.error}`, 'error');
+                }
+                
+                console.log('[DEBUG] Wyniki testu połączenia:', results);
+            } catch (error) {
+                console.error('[BŁĄD] Błąd podczas testowania połączenia:', error);
+                showToast('Błąd testu', error.message, 'error');
+            }
+        }
+
+        // Dodaj opcję testowania połączenia do urządzeń
+        const originalOnPeersUpdated = client.onPeersUpdated;
+        client.onPeersUpdated = (peers) => {
+            // Najpierw wywołaj oryginalną funkcję
+            if (originalOnPeersUpdated) {
+                originalOnPeersUpdated(peers);
+            }
+            
+            // Następnie dodaj menu kontekstowe do każdego urządzenia
+            setTimeout(() => {
+                const peerElements = document.querySelectorAll('.other-device');
+                
+                peerElements.forEach(element => {
+                    const peerId = element.dataset.peerId;
+                    
+                    // Dodaj obsługę kliknięcia prawym przyciskiem myszy
+                    element.addEventListener('contextmenu', (e) => {
+                        e.preventDefault();
+                        
+                        // Utwórz menu kontekstowe
+                        const contextMenu = document.createElement('div');
+                        contextMenu.className = 'context-menu';
+                        contextMenu.style.position = 'absolute';
+                        contextMenu.style.left = `${e.pageX}px`;
+                        contextMenu.style.top = `${e.pageY}px`;
+                        contextMenu.style.backgroundColor = 'var(--glass-bg)';
+                        contextMenu.style.backdropFilter = 'blur(10px)';
+                        contextMenu.style.padding = '10px';
+                        contextMenu.style.borderRadius = '10px';
+                        contextMenu.style.boxShadow = '0 5px 15px rgba(0,0,0,0.2)';
+                        contextMenu.style.zIndex = '1000';
+                        
+                        contextMenu.innerHTML = `
+                            <div style="padding: 8px; cursor: pointer;" id="test-connection-${peerId}">Test połączenia</div>
+                            <div style="padding: 8px; cursor: pointer;" id="test-transfer-${peerId}">Test transferu</div>
+                        `;
+                        
+                        document.body.appendChild(contextMenu);
+                        
+                        // Obsługa zamknięcia menu
+                        const closeMenu = () => {
+                            if (document.body.contains(contextMenu)) {
+                                document.body.removeChild(contextMenu);
+                            }
+                            document.removeEventListener('click', closeMenu);
+                        };
+                        
+                        // Zamknij menu po kliknięciu gdziekolwiek
+                        setTimeout(() => {
+                            document.addEventListener('click', closeMenu);
+                        }, 100);
+                        
+                        // Obsługa opcji menu
+                        document.getElementById(`test-connection-${peerId}`).addEventListener('click', () => {
+                            testPeerConnection(peerId);
+                            closeMenu();
+                        });
+                        
+                        document.getElementById(`test-transfer-${peerId}`).addEventListener('click', () => {
+                            testFileTransfer(peerId);
+                            closeMenu();
+                        });
+                    });
+                });
+            }, 500);
+        };
+
+        // Funkcja do testowania transferu plików
+        async function testFileTransfer(peerId) {
+            showToast('Test transferu', `Testowanie transferu z ${peerId}...`, 'info');
+            
+            try {
+                const results = await client.testFileTransfer(peerId);
+                
+                if (results.success) {
+                    showToast('Test transferu', `Transfer udany, czas: ${results.timeTaken}ms`, 'success');
+                } else {
+                    showToast('Test transferu', `Błąd transferu: ${results.error}`, 'error');
+                }
+                
+                console.log('[DEBUG] Wyniki testu transferu:', results);
+            } catch (error) {
+                console.error('[BŁĄD] Błąd podczas testowania transferu:', error);
+                showToast('Błąd testu', error.message, 'error');
+            }
+        }
     </script>
 </body>
 </html>
