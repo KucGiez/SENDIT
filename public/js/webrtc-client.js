@@ -16,35 +16,53 @@ class SendItClient {
         this.onPeersUpdated = null;
         this.onTransferRequest = null; // Callback dla żądań transferu
         this.connectionRetryCount = 0;
-        this.maxConnectionRetries = 5; // Zwiększenie liczby prób
+        this.maxConnectionRetries = 5; // Liczba prób połączenia
         this.useFallbackIceServers = false;
         this.isConnecting = {}; // Śledzenie stanu łączenia dla każdego ID peera
         this.pendingTransfers = {}; // Śledzenie oczekujących transferów
-        this.iceFailedPeers = new Set(); // Śledzenie peerów z błędami ICE
+        this.iceFailedPeers = new Set(); // Śledzenie peerów z problemami ICE
+        
+        // Konfiguracja timeoutów i limitów
+        this.connectionTimeout = 60000; // 60 sekund na nawiązanie połączenia (zwiększone z 30s)
+        this.signalTimeout = 10000;    // 10 sekund na odebranie sygnału
+        this.chunkSize = 16384;        // 16KB dla fragmentów plików
     }
 
     // Inicjalizacja połączenia z serwerem sygnalizacyjnym
     init() {
         return new Promise((resolve, reject) => {
             try {
-                this.socket = io();
+                console.log('[DEBUG] Inicjalizacja klienta SendIt...');
+                
+                // Próba detekcji URL serwera
+                const serverUrl = window.location.origin;
+                console.log(`[DEBUG] Łączenie z serwerem: ${serverUrl}`);
+                
+                // Połączenie z serwerem z rozszerzonymi opcjami
+                this.socket = io({
+                    reconnectionDelay: 1000,
+                    reconnectionDelayMax: 5000,
+                    reconnectionAttempts: 10,
+                    timeout: 20000 // Zwiększony timeout
+                });
                 
                 this.socket.on('connect', () => {
-                    console.log('Połączono z serwerem sygnalizacyjnym');
+                    console.log('[DEBUG] Połączono z serwerem sygnalizacyjnym');
                 });
                 
                 this.socket.on('assigned-id', (id) => {
                     this.peerId = id;
-                    console.log('Przydzielono ID:', id);
+                    console.log('[DEBUG] Przydzielono ID:', id);
                     resolve();
                 });
                 
                 this.socket.on('network-id', (networkId) => {
-                    console.log('Przydzielono ID sieci:', networkId);
+                    console.log('[DEBUG] Przydzielono ID sieci:', networkId);
                     this.networkId = networkId;
                 });
                 
                 this.socket.on('active-peers', (peers) => {
+                    console.log(`[DEBUG] Otrzymano listę ${peers.length} aktywnych peerów`);
                     this.peers = {};
                     peers.forEach(peer => {
                         this.peers[peer.id] = peer;
@@ -56,6 +74,7 @@ class SendItClient {
                 });
                 
                 this.socket.on('peer-joined', (peer) => {
+                    console.log(`[DEBUG] Nowy peer dołączył do sieci: ${peer.name} (${peer.id})`);
                     this.peers[peer.id] = peer;
                     
                     if (this.onPeerConnected) {
@@ -69,14 +88,16 @@ class SendItClient {
                 
                 this.socket.on('peer-left', (peerId) => {
                     const peer = this.peers[peerId];
+                    console.log(`[DEBUG] Peer opuścił sieć: ${peer?.name || 'Nieznany'} (${peerId})`);
                     delete this.peers[peerId];
                     
                     // Zamknij wszystkie istniejące połączenia z tym peerem
                     if (this.activeConnections[peerId]) {
                         try {
+                            console.log(`[DEBUG] Zamykanie połączenia z ${peerId}`);
                             this.activeConnections[peerId].destroy();
                         } catch (err) {
-                            console.error('Błąd podczas zamykania połączenia:', err);
+                            console.error('[BŁĄD] Błąd podczas zamykania połączenia:', err);
                         }
                         delete this.activeConnections[peerId];
                         delete this.isConnecting[peerId];
@@ -95,19 +116,20 @@ class SendItClient {
                     }
                 });
                 
-                // Obsługa wiadomości sygnalizacyjnych
+                // Obsługa wiadomości sygnalizacyjnych z bardziej szczegółowym logowaniem
                 this.socket.on('signal', async ({ peerId, signal }) => {
                     try {
-                        console.log(`Otrzymano sygnał od ${peerId}:`, signal.type || 'unknown');
+                        console.log(`[DEBUG] Otrzymano sygnał od ${peerId}: ${signal.type || 'candidate'}`);
                         
                         // Sprawdź czy połączenie już istnieje lub jest w trakcie tworzenia
                         if (!this.activeConnections[peerId] && !this.isConnecting[peerId]) {
                             // Oznacz, że rozpoczęto łączenie
+                            console.log(`[DEBUG] Tworzenie nowego połączenia po otrzymaniu sygnału od ${peerId}`);
                             this.isConnecting[peerId] = true;
                             try {
                                 await this.createPeerConnection(peerId, false);
                             } catch (error) {
-                                console.error('Błąd podczas tworzenia połączenia po otrzymaniu sygnału:', error);
+                                console.error(`[BŁĄD] Błąd podczas tworzenia połączenia po otrzymaniu sygnału: ${error.message}`);
                                 delete this.isConnecting[peerId];
                                 return;
                             }
@@ -115,23 +137,47 @@ class SendItClient {
                         
                         // Zabezpieczenie przed przypadkiem, gdy połączenie mogło zostać usunięte w międzyczasie
                         if (this.activeConnections[peerId]) {
+                            console.log(`[DEBUG] Przekazanie sygnału do obiektu peer dla ${peerId}`);
                             await this.activeConnections[peerId].signal(signal);
                         } else {
-                            console.warn(`Nie można przetworzyć sygnału dla ${peerId} - brak połączenia`);
+                            console.warn(`[OSTRZEŻENIE] Nie można przetworzyć sygnału dla ${peerId} - brak połączenia`);
                         }
                     } catch (error) {
-                        console.error('Błąd podczas przetwarzania sygnału:', error);
+                        console.error(`[BŁĄD] Błąd podczas przetwarzania sygnału: ${error.message}`);
                         // Usuń znacznik tworzenia połączenia w przypadku błędu
                         delete this.isConnecting[peerId];
                     }
                 });
                 
                 this.socket.on('connect_error', (error) => {
-                    console.error('Błąd połączenia z serwerem:', error);
+                    console.error(`[BŁĄD] Błąd połączenia z serwerem: ${error.message}`);
                     reject(error);
                 });
+                
+                this.socket.on('disconnect', (reason) => {
+                    console.warn(`[OSTRZEŻENIE] Rozłączono z serwerem sygnalizacyjnym. Powód: ${reason}`);
+                    // Automatyczne ponowne połączenie jest obsługiwane przez Socket.IO
+                });
+                
+                this.socket.on('reconnect', (attemptNumber) => {
+                    console.log(`[DEBUG] Ponowne połączenie z serwerem udane (próba #${attemptNumber})`);
+                });
+                
+                this.socket.on('reconnect_attempt', (attemptNumber) => {
+                    console.log(`[DEBUG] Próba ponownego połączenia #${attemptNumber}...`);
+                });
+                
+                this.socket.on('reconnect_error', (error) => {
+                    console.error(`[BŁĄD] Błąd podczas ponownego łączenia: ${error.message}`);
+                });
+                
+                this.socket.on('reconnect_failed', () => {
+                    console.error('[BŁĄD] Nie udało się ponownie połączyć z serwerem po wszystkich próbach');
+                    reject(new Error('Nie udało się ponownie połączyć z serwerem po wszystkich próbach'));
+                });
+                
             } catch (error) {
-                console.error('Błąd inicjalizacji klienta:', error);
+                console.error(`[BŁĄD] Błąd inicjalizacji klienta: ${error.message}`);
                 reject(error);
             }
         });
@@ -140,6 +186,7 @@ class SendItClient {
     // Rejestracja nazwy urządzenia
     registerDevice(name) {
         this.deviceName = name;
+        console.log(`[DEBUG] Rejestracja urządzenia: ${name}`);
         this.socket.emit('register-name', name);
     }
 
@@ -171,37 +218,46 @@ class SendItClient {
 
         // Jeśli ustawiono flagę awaryjną, użyj tylko podstawowych serwerów STUN/TURN
         if (this.useFallbackIceServers) {
-            console.log('Używam awaryjnych serwerów ICE');
+            console.log('[DEBUG] Używam awaryjnych serwerów ICE');
             return publicServers;
         }
 
         try {
-            console.log('Pobieranie poświadczeń TURN z serwera...');
+            console.log('[DEBUG] Pobieranie poświadczeń TURN z serwera...');
             const startTime = Date.now();
             
-            const response = await fetch('/api/turn-credentials');
+            const response = await fetch('/api/turn-credentials', {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                    'Cache-Control': 'no-cache'
+                },
+                cache: 'no-store',
+                timeout: 5000 // 5 sekund timeout
+            });
+            
             const responseTime = Date.now() - startTime;
-            console.log(`Otrzymano odpowiedź z serwera TURN w ${responseTime}ms`);
+            console.log(`[DEBUG] Otrzymano odpowiedź z serwera TURN w ${responseTime}ms`);
+            
+            if (!response.ok) {
+                console.warn(`[OSTRZEŻENIE] Serwer zwrócił kod ${response.status}`);
+                return publicServers;
+            }
             
             const data = await response.json();
             
-            if (!response.ok) {
-                console.warn('Serwer zwrócił błąd:', data.error);
-                return publicServers;
-            }
-            
             if (!Array.isArray(data) || data.length === 0) {
-                console.warn('Otrzymano nieprawidłowe dane z serwera TURN:', data);
+                console.warn('[OSTRZEŻENIE] Otrzymano nieprawidłowe dane z serwera TURN:', data);
                 return publicServers;
             }
             
-            console.log(`Pobrano ${data.length} serwerów ICE:`, 
+            console.log(`[DEBUG] Pobrano ${data.length} serwerów ICE:`, 
                 data.map(server => server.urls).join(', '));
             
             // Połącz serwery z API z publicznymi serwerami dla większej niezawodności
             return [...data, ...publicServers];
         } catch (error) {
-            console.error('Błąd podczas pobierania poświadczeń TURN:', error);
+            console.error(`[BŁĄD] Błąd podczas pobierania poświadczeń TURN: ${error.message}`);
             return publicServers;
         }
     }
@@ -271,6 +327,11 @@ class SendItClient {
                     return sdp;
                 }
             };
+            
+            // Sprawdzenie czy SimplePeer jest dostępny
+            if (typeof SimplePeer !== 'function') {
+                throw new Error('Biblioteka SimplePeer nie jest dostępna. Sprawdź, czy została poprawnie załadowana.');
+            }
             
             // Tworzenie obiektu peer
             const peer = new SimplePeer(peerConfig);
@@ -450,10 +511,7 @@ class SendItClient {
                 peer._pc.onicecandidate = (event) => {
                     if (event.candidate) {
                         console.log(`[DEBUG] Nowy kandydat ICE dla ${targetPeerId}:`, 
-                            event.candidate.candidate,
-                            `typ: ${event.candidate.type || 'nieznany'}`, 
-                            `protokół: ${event.candidate.protocol || 'nieznany'}`, 
-                            `adres: ${event.candidate.address || 'nieznany'}`);
+                            event.candidate.candidate || 'brak szczegółów');
                     }
                 };
             }
@@ -499,12 +557,12 @@ class SendItClient {
     // Wysłanie żądania transferu plików
     async requestFileTransfer(targetPeerId, files) {
         try {
-            console.log(`Wysyłanie żądania transferu ${files.length} plików do ${targetPeerId}`);
+            console.log(`[DEBUG] Wysyłanie żądania transferu ${files.length} plików do ${targetPeerId}`);
             
             // Jeśli ten peer miał wcześniej problemy z ICE, użyj od razu serwerów awaryjnych
             if (this.iceFailedPeers.has(targetPeerId)) {
                 this.useFallbackIceServers = true;
-                console.log(`Używam serwerów awaryjnych dla ${targetPeerId} z powodu wcześniejszych problemów ICE`);
+                console.log(`[DEBUG] Używam serwerów awaryjnych dla ${targetPeerId} z powodu wcześniejszych problemów ICE`);
             }
             
             // Sprawdź, czy jest aktywne połączenie i czy jest gotowe
@@ -512,7 +570,7 @@ class SendItClient {
             let needNewConnection = !this.isConnectionReady(targetPeerId);
             
             if (needNewConnection) {
-                console.log(`Brak aktywnego gotowego połączenia z ${targetPeerId}, tworzę nowe połączenie`);
+                console.log(`[DEBUG] Brak aktywnego połączenia z ${targetPeerId}, tworzę nowe połączenie`);
                 
                 // Wyczyść poprzednie połączenie, jeśli istnieje
                 if (connection) {
@@ -528,7 +586,7 @@ class SendItClient {
                     
                     // Funkcja obsługi połączenia
                     const connectHandler = () => {
-                        console.log(`Pomyślnie nawiązano połączenie z ${targetPeerId}`);
+                        console.log(`[DEBUG] Pomyślnie nawiązano połączenie z ${targetPeerId}`);
                         clearTimeout(connectionTimeout);
                         connection.removeListener('connect', connectHandler);
                         connection.removeListener('error', errorHandler);
@@ -537,7 +595,7 @@ class SendItClient {
                     
                     // Funkcja obsługi błędu
                     const errorHandler = (err) => {
-                        console.error(`Błąd podczas nawiązywania połączenia z ${targetPeerId}:`, err);
+                        console.error(`[BŁĄD] Błąd podczas nawiązywania połączenia z ${targetPeerId}:`, err);
                         clearTimeout(connectionTimeout);
                         connection.removeListener('connect', connectHandler);
                         connection.removeListener('error', errorHandler);
@@ -546,10 +604,11 @@ class SendItClient {
                     
                     // Ustaw timeout
                     connectionTimeout = setTimeout(() => {
+                        console.error(`[BŁĄD] Przekroczono czas oczekiwania na połączenie z ${targetPeerId}`);
                         connection.removeListener('connect', connectHandler);
                         connection.removeListener('error', errorHandler);
                         reject(new Error('Przekroczono czas oczekiwania na połączenie'));
-                    }, 30000);
+                    }, this.connectionTimeout); // Używamy zdefiniowanego timeout
                     
                     // Dodaj obserwatory zdarzeń
                     connection.once('connect', connectHandler);
@@ -580,6 +639,7 @@ class SendItClient {
             
             try {
                 // Wyślij żądanie transferu plików
+                console.log(`[DEBUG] Wysyłanie żądania transferu do ${targetPeerId}`);
                 connection.send(JSON.stringify({
                     type: 'request-transfer',
                     files: filesMetadata,
@@ -587,7 +647,7 @@ class SendItClient {
                     senderName: this.deviceName
                 }));
                 
-                console.log(`Wysłano żądanie transferu plików do ${targetPeerId}`);
+                console.log(`[DEBUG] Pomyślnie wysłano żądanie transferu plików do ${targetPeerId}`);
                 
                 // Zapisz pliki do tymczasowej kolejki oczekując na odpowiedź
                 this.pendingTransfers[targetPeerId] = {
@@ -598,7 +658,7 @@ class SendItClient {
                 // Rozpocznij timeout dla oczekiwania na odpowiedź (30 sekund)
                 setTimeout(() => {
                     if (this.pendingTransfers[targetPeerId]) {
-                        console.log(`Timeout oczekiwania na odpowiedź od ${targetPeerId}`);
+                        console.log(`[DEBUG] Timeout oczekiwania na odpowiedź od ${targetPeerId}`);
                         delete this.pendingTransfers[targetPeerId];
                         if (this.onTransferError) {
                             this.onTransferError(targetPeerId, 'Nie otrzymano odpowiedzi na żądanie transferu');
@@ -608,11 +668,11 @@ class SendItClient {
                 
                 return true;
             } catch (error) {
-                console.error('Błąd podczas wysyłania żądania transferu:', error);
+                console.error(`[BŁĄD] Błąd podczas wysyłania żądania transferu: ${error.message}`);
                 throw new Error('Błąd podczas wysyłania żądania transferu: ' + error.message);
             }
         } catch (error) {
-            console.error('Błąd podczas przygotowania żądania transferu plików:', error);
+            console.error(`[BŁĄD] Błąd podczas przygotowania żądania transferu plików: ${error.message}`);
             if (this.onTransferError) {
                 this.onTransferError(targetPeerId, error.message);
             }
@@ -629,14 +689,15 @@ class SendItClient {
             
             const connection = this.activeConnections[peerId];
             
+            console.log(`[DEBUG] Wysyłanie ${accepted ? 'akceptacji' : 'odrzucenia'} transferu do ${peerId}`);
             connection.send(JSON.stringify({
                 type: accepted ? 'accept-transfer' : 'reject-transfer'
             }));
             
-            console.log(`Wysłano ${accepted ? 'akceptację' : 'odrzucenie'} transferu do ${peerId}`);
+            console.log(`[DEBUG] Pomyślnie wysłano ${accepted ? 'akceptację' : 'odrzucenie'} transferu do ${peerId}`);
             return true;
         } catch (error) {
-            console.error('Błąd podczas odpowiadania na żądanie transferu:', error);
+            console.error(`[BŁĄD] Błąd podczas odpowiadania na żądanie transferu: ${error.message}`);
             if (this.onTransferError) {
                 this.onTransferError(peerId, error.message);
             }
@@ -655,7 +716,7 @@ class SendItClient {
             
             return true;
         } catch (error) {
-            console.error('Błąd podczas wysyłania plików:', error);
+            console.error(`[BŁĄD] Błąd podczas wysyłania plików: ${error.message}`);
             if (this.onTransferError) {
                 this.onTransferError(targetPeerId, error.message);
             }
@@ -725,10 +786,6 @@ class SendItClient {
             
             const connection = this.activeConnections[peerId];
             
-            // Rozszerzony chunkSize dla lepszej wydajności w dobrych połączeniach
-            // Ale nie za duży, aby uniknąć problemów z buforowaniem
-            const chunkSize = 16384; // 16KB chunks
-            
             // Licznik fragmentów dla potrzeb debugowania
             let chunkCounter = 0;
             
@@ -749,7 +806,8 @@ class SendItClient {
                 }));
                 
                 // Dodaj krótkie opóźnienie, aby upewnić się, że wiadomość start-file dotrze przed fragmentami
-                await new Promise(resolve => setTimeout(resolve, 100));
+                await new Promise(resolve => setTimeout(resolve, 500));
+                console.log(`[DEBUG] Rozpoczynam wysyłanie fragmentów pliku do ${peerId}`);
                 
             } catch (error) {
                 console.error(`[BŁĄD] Błąd podczas wysyłania informacji o rozpoczęciu transferu: ${error.message}`);
@@ -780,7 +838,7 @@ class SendItClient {
                 }
                 
                 try {
-                    const slice = file.slice(offset, offset + chunkSize);
+                    const slice = file.slice(offset, offset + this.chunkSize);
                     reader.readAsArrayBuffer(slice);
                     chunkCounter++;
                 } catch (error) {
@@ -805,7 +863,7 @@ class SendItClient {
                     if (!chunk || chunk.byteLength === 0) {
                         console.warn(`[OSTRZEŻENIE] Pusty fragment pliku przy offset ${offset}`);
                         // Kontynuuj mimo to
-                        offset += chunkSize;
+                        offset += this.chunkSize;
                         if (offset < file.size) {
                             readNextChunk();
                         } else {
@@ -814,42 +872,49 @@ class SendItClient {
                         return;
                     }
                     
-                    // Wysłanie fragmentu danych z obsługą błędów
-                    try {
-                        connection.send(chunk);
-                    } catch (sendError) {
-                        console.error(`[BŁĄD] Błąd podczas wysyłania fragmentu: ${sendError.message}`);
-                        throw sendError;
-                    }
-                    
-                    offset += chunk.byteLength;
-                    const progress = Math.min(100, Math.floor((offset / file.size) * 100));
-                    
-                    // Obliczenie prędkości transferu
-                    const now = Date.now();
-                    const timeDiff = now - lastUpdateTime;
-                    if (timeDiff > 500) { // Aktualizuj co pół sekundy
-                        const bytesPerSecond = ((offset - lastOffset) / timeDiff) * 1000;
-                        lastUpdateTime = now;
-                        lastOffset = offset;
-                        
-                        // Logowanie co 10% postępu
-                        if (progress % 10 === 0 || progress === 100) {
-                            console.log(`[DEBUG] Postęp transferu: ${progress}%, prędkość: ${this.formatFileSize(bytesPerSecond)}/s`);
+                    // Dodajemy mały delay między wysyłaniem dużych fragmentów, aby uniknąć przepełnienia bufora
+                    const sendChunk = () => {
+                        try {
+                            // Wysłanie fragmentu danych
+                            connection.send(chunk);
+                            
+                            offset += chunk.byteLength;
+                            const progress = Math.min(100, Math.floor((offset / file.size) * 100));
+                            
+                            // Obliczenie prędkości transferu
+                            const now = Date.now();
+                            const timeDiff = now - lastUpdateTime;
+                            if (timeDiff > 500) { // Aktualizuj co pół sekundy
+                                const bytesPerSecond = ((offset - lastOffset) / timeDiff) * 1000;
+                                lastUpdateTime = now;
+                                lastOffset = offset;
+                                
+                                // Logowanie co 10% postępu
+                                if (progress % 10 === 0 || progress === 100) {
+                                    console.log(`[DEBUG] Postęp transferu: ${progress}%, prędkość: ${this.formatFileSize(bytesPerSecond)}/s`);
+                                }
+                                
+                                // Aktualizacja postępu
+                                if (this.onTransferProgress) {
+                                    this.onTransferProgress(peerId, file, progress, offset, false, bytesPerSecond);
+                                }
+                            }
+                            
+                            if (offset < file.size) {
+                                // Małe opóźnienie między fragmentami dla lepszej stabilności
+                                setTimeout(readNextChunk, 10);
+                            } else {
+                                finishTransfer();
+                            }
+                        } catch (sendError) {
+                            console.error(`[BŁĄD] Błąd podczas wysyłania fragmentu: ${sendError.message}`);
+                            throw sendError;
                         }
-                        
-                        // Aktualizacja postępu
-                        if (this.onTransferProgress) {
-                            this.onTransferProgress(peerId, file, progress, offset, false, bytesPerSecond);
-                        }
-                    }
+                    };
                     
-                    if (offset < file.size) {
-                        // Odczytaj kolejny fragment
-                        readNextChunk();
-                    } else {
-                        finishTransfer();
-                    }
+                    // Wysyłamy od razu, ale możemy dodać opóźnienie, jeśli są problemy ze stabilnością
+                    sendChunk();
+                    
                 } catch (error) {
                     console.error(`[BŁĄD] Błąd podczas wysyłania danych: ${error.message}`);
                     if (this.onTransferError) {
@@ -884,7 +949,7 @@ class SendItClient {
                         }
                         this.processNextTransfer();
                     }
-                }, 100);
+                }, 500); // Zwiększone opóźnienie dla lepszej niezawodności
             };
             
             reader.onerror = (error) => {
@@ -909,7 +974,7 @@ class SendItClient {
 
     // Anulowanie transferu (można wywołać z UI)
     cancelTransfer(peerId) {
-        console.log(`Anulowanie transferu dla ${peerId}`);
+        console.log(`[DEBUG] Anulowanie transferu dla ${peerId}`);
         
         try {
             if (this.isConnectionReady(peerId)) {
@@ -930,7 +995,7 @@ class SendItClient {
             
             return true;
         } catch (error) {
-            console.error('Błąd podczas anulowania transferu:', error);
+            console.error(`[BŁĄD] Błąd podczas anulowania transferu: ${error.message}`);
             return false;
         }
     }
@@ -1085,7 +1150,7 @@ class SendItClient {
                         
                     case 'reject-transfer':
                         // Transfer został odrzucony
-                        console.log(`Transfer został odrzucony przez ${peerId}`);
+                        console.log(`[DEBUG] Transfer został odrzucony przez ${peerId}`);
                         
                         // Usuń oczekujące pliki dla tego peera
                         delete this.pendingTransfers[peerId];
@@ -1098,7 +1163,7 @@ class SendItClient {
                         
                     case 'cancel-transfer':
                         // Transfer został anulowany przez drugą stronę
-                        console.log(`Transfer został anulowany przez ${peerId}`);
+                        console.log(`[DEBUG] Transfer został anulowany przez ${peerId}`);
                         
                         // Wyczyść bieżący odbierany plik
                         this.currentReceivingFile = null;
@@ -1224,7 +1289,7 @@ class SendItClient {
 
     // Zamknięcie wszystkich połączeń
     disconnect() {
-        console.log('Zamykanie wszystkich połączeń');
+        console.log('[DEBUG] Zamykanie wszystkich połączeń');
         Object.keys(this.activeConnections).forEach(peerId => {
             this.cleanupConnection(peerId);
         });
@@ -1457,7 +1522,7 @@ class SendItClient {
                     };
                     checkCompletion();
                 }),
-                new Promise(resolve => setTimeout(() => resolve({ success: false, error: 'Timeout' }), 30000))
+                new Promise(resolve => setTimeout(() => resolve({ success: false, error: 'Timeout transferu testowego' }), 30000))
             ]);
             
             // Przywróć oryginalne callbacki
