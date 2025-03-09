@@ -66,7 +66,7 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            justify-content: flex-start;
             padding: 2rem;
         }
 
@@ -78,6 +78,17 @@
             margin: 2rem 0;
             width: 100%;
             max-width: 1200px;
+        }
+
+        .section-title {
+            width: 100%;
+            max-width: 1200px;
+            text-align: left;
+            margin-bottom: 1rem;
+            color: var(--dark-text);
+            font-weight: 600;
+            font-size: 1.5rem;
+            padding-left: 0.5rem;
         }
 
         .self-device {
@@ -158,6 +169,120 @@
 
         .other-device:hover {
             transform: translateY(-10px) rotateX(5deg);
+        }
+
+        /* Sekcja plików */
+        .received-files-container {
+            width: 100%;
+            max-width: 1200px;
+            margin: 2rem 0;
+            display: none;
+        }
+
+        .files-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2rem;
+            justify-content: flex-start;
+        }
+
+        .file-item {
+            backdrop-filter: blur(10px);
+            background-color: var(--glass-bg);
+            border-radius: 1.5rem;
+            padding: 1.5rem;
+            width: 250px;
+            box-shadow: 0 10px 30px var(--shadow-color);
+            text-align: center;
+            transform-style: preserve-3d;
+            transition: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            animation: appear 0.5s ease forwards;
+        }
+
+        @keyframes appear {
+            from {
+                opacity: 0;
+                transform: scale(0.9);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
+        .file-item:hover {
+            transform: translateY(-10px) rotateX(5deg);
+        }
+
+        .file-icon {
+            font-size: 3rem;
+            margin-bottom: 0.5rem;
+            color: var(--primary-color);
+        }
+
+        .file-name {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            word-break: break-word;
+            white-space: normal;
+        }
+
+        .file-size {
+            color: var(--light-text);
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+        }
+
+        .file-actions {
+            display: flex;
+            justify-content: center;
+        }
+
+        .file-download-btn {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 2rem;
+            padding: 0.5rem 1.5rem;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 10px rgba(0, 113, 227, 0.3);
+        }
+
+        .file-download-btn:hover {
+            background-color: #0062c9;
+            transform: scale(1.05);
+            box-shadow: 0 5px 15px rgba(0, 113, 227, 0.4);
+        }
+
+        .file-preview {
+            max-width: 100%;
+            max-height: 120px;
+            margin-bottom: 1rem;
+            border-radius: 0.5rem;
+            object-fit: cover;
+        }
+
+        .clear-files-btn {
+            background-color: #e53935;
+            color: white;
+            border: none;
+            border-radius: 2rem;
+            padding: 0.7rem 1.5rem;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 1rem;
+            align-self: flex-end;
+        }
+
+        .clear-files-btn:hover {
+            background-color: #c62828;
+            transform: scale(1.05);
         }
 
         .transfer-request-container {
@@ -399,6 +524,10 @@
                 width: 100%;
                 max-width: 350px;
             }
+
+            .files-grid {
+                justify-content: center;
+            }
         }
 
         /* Animacje */
@@ -419,6 +548,7 @@
     </header>
     
     <main>
+        <h3 class="section-title">Dostępne urządzenia</h3>
         <div class="devices-container" id="devices-container">
             <div class="self-device">
                 <div class="device-icon">📱</div>
@@ -427,6 +557,14 @@
                 <input type="file" id="file-input" class="file-input" multiple>
                 <button class="upload-btn" id="upload-btn">Wybierz pliki</button>
             </div>
+        </div>
+
+        <div class="received-files-container" id="received-files-container">
+            <h3 class="section-title">Odebrane pliki</h3>
+            <div class="files-grid" id="files-grid">
+                <!-- Tu pojawią się odebrane pliki -->
+            </div>
+            <button class="clear-files-btn" id="clear-files-btn">Wyczyść wszystkie</button>
         </div>
     </main>
     
@@ -777,6 +915,17 @@
             const transferDirectionIcon = document.getElementById('transfer-direction-icon');
             const cancelTransfer = document.getElementById('cancel-transfer');
             
+            const receivedFilesContainer = document.getElementById('received-files-container');
+            const filesGrid = document.getElementById('files-grid');
+            const clearFilesBtn = document.getElementById('clear-files-btn');
+            
+            // Obsługa przycisku czyszczenia odebranych plików
+            clearFilesBtn.addEventListener('click', () => {
+                filesGrid.innerHTML = '';
+                receivedFilesContainer.style.display = 'none';
+                showToast('Pliki usunięte', 'Usunięto wszystkie odebrane pliki', 'info');
+            });
+            
             // Inicjalizacja klienta SendIt
             const client = new SendItClient();
             const particleTransfer = new ParticleTransfer();
@@ -996,26 +1145,62 @@
                 client.onFilesReceived = (peerId, files) => {
                     transferContainer.classList.remove('active');
                     
+                    // Pokaż kontener na odebrane pliki, jeśli jeszcze nie jest widoczny
+                    receivedFilesContainer.style.display = 'block';
+                    
+                    // Dodaj każdy plik jako kafelkę
                     files.forEach(file => {
-                        // Utworzenie URL dla pliku
+                        const fileElement = document.createElement('div');
+                        fileElement.className = 'file-item';
+                        
+                        // Określ ikonę na podstawie typu pliku
+                        let fileIcon = '📄';
+                        if (file.type.startsWith('image/')) fileIcon = '🖼️';
+                        if (file.type.startsWith('video/')) fileIcon = '🎬';
+                        if (file.type.startsWith('audio/')) fileIcon = '🎵';
+                        
+                        // Utwórz URL dla pliku
                         const fileUrl = URL.createObjectURL(file.data);
                         
-                        // Utwórz element do pobrania
-                        const a = document.createElement('a');
-                        a.href = fileUrl;
-                        a.download = file.name;
-                        a.style.display = 'none';
-                        document.body.appendChild(a);
+                        let previewHtml = '';
+                        // Dodaj podgląd jeśli to obraz
+                        if (file.type.startsWith('image/')) {
+                            previewHtml = `<img src="${fileUrl}" alt="${file.name}" class="file-preview">`;
+                        }
                         
-                        // Pobierz plik
-                        a.click();
+                        fileElement.innerHTML = `
+                            ${previewHtml}
+                            <div class="file-icon">${fileIcon}</div>
+                            <div class="file-name">${file.name}</div>
+                            <div class="file-size">${formatFileSize(file.size)}</div>
+                            <div class="file-actions">
+                                <button class="file-download-btn" data-url="${fileUrl}" data-filename="${file.name}">Pobierz</button>
+                            </div>
+                        `;
                         
-                        // Wyczyść
-                        URL.revokeObjectURL(fileUrl);
-                        document.body.removeChild(a);
+                        filesGrid.appendChild(fileElement);
+                        
+                        // Znajdź przycisk pobierania i dodaj obsługę zdarzenia
+                        const downloadBtn = fileElement.querySelector('.file-download-btn');
+                        downloadBtn.addEventListener('click', (e) => {
+                            const url = e.target.dataset.url;
+                            const filename = e.target.dataset.filename;
+                            
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = filename;
+                            a.style.display = 'none';
+                            document.body.appendChild(a);
+                            a.click();
+                            
+                            // Nie usuwamy URL, aby zachować podgląd obrazu
+                            document.body.removeChild(a);
+                            
+                            showToast('Plik pobrany', `Plik "${filename}" został pobrany`, 'success');
+                        });
                     });
                     
-                    const peerName = document.querySelector(`[data-peer-id="${peerId}"]`)?.querySelector('.device-name')?.textContent || 'Innego urządzenia';
+                    const peerName = document.querySelector(`[data-peer-id="${peerId}"]`)?.querySelector('.device-name')?.textContent || 'Nieznane urządzenie';
                     showToast('Pliki odebrane', `Otrzymano ${files.length} plików od ${peerName}`, 'success');
                 };
                 
