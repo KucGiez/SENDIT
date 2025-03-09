@@ -3,7 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const os = require('os');
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const https = require('https');
 
 const app = express();
 const server = http.createServer(app);
@@ -12,24 +12,82 @@ const io = new Server(server);
 // Serwowanie plików statycznych
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Funkcja do pobierania poświadczeń TURN
+function fetchTurnCredentials() {
+  return new Promise((resolve, reject) => {
+    const apiKey = '606e2f3b5aabd4c33e1b5c5cce474f2b17f8';
+    const url = `https://owoc.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`;
+    
+    https.get(url, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          if (res.statusCode !== 200) {
+            console.error('Błąd podczas pobierania poświadczeń TURN:', res.statusCode, data);
+            // Zwracamy awaryjne, statyczne poświadczenia TURN
+            resolve([
+              {
+                urls: "stun:stun.relay.metered.ca:80"
+              },
+              {
+                urls: "turn:global.relay.metered.ca:80",
+                username: "041533025c7ee2fd11afa46e",
+                credential: "NmredoIjnB5jEIWP"
+              },
+              {
+                urls: "turn:global.relay.metered.ca:80?transport=tcp",
+                username: "041533025c7ee2fd11afa46e",
+                credential: "NmredoIjnB5jEIWP"
+              },
+              {
+                urls: "turn:global.relay.metered.ca:443",
+                username: "041533025c7ee2fd11afa46e",
+                credential: "NmredoIjnB5jEIWP"
+              },
+              {
+                urls: "turns:global.relay.metered.ca:443?transport=tcp",
+                username: "041533025c7ee2fd11afa46e",
+                credential: "NmredoIjnB5jEIWP"
+              }
+            ]);
+            return;
+          }
+          
+          const credentials = JSON.parse(data);
+          console.log('Pobrano poświadczenia TURN:', credentials.length, 'serwerów');
+          resolve(credentials);
+        } catch (error) {
+          console.error('Błąd przetwarzania odpowiedzi TURN:', error);
+          reject(error);
+        }
+      });
+    }).on('error', (error) => {
+      console.error('Błąd połączenia z API Metered:', error);
+      reject(error);
+    });
+  });
+}
+
 // Endpoint do pobierania poświadczeń TURN
 app.get('/api/turn-credentials', async (req, res) => {
   try {
-    // Pobieranie tymczasowych poświadczeń z serwera Metered
-    const response = await fetch(
-      "https://owoc.metered.live/api/v1/turn/credentials?apiKey=606e2f3b5aabd4c33e1b5c5cce474f2b17f8"
-    );
-    
-    if (!response.ok) {
-      throw new Error('Błąd podczas pobierania poświadczeń TURN');
-    }
-    
-    // Przekazanie poświadczeń do klienta
-    const credentials = await response.json();
+    const credentials = await fetchTurnCredentials();
     res.json(credentials);
+    console.log('Wysłano poświadczenia TURN do klienta');
   } catch (error) {
     console.error('Błąd pobierania poświadczeń TURN:', error);
-    res.status(500).json({ error: 'Nie udało się pobrać poświadczeń TURN' });
+    res.status(500).json({
+      error: 'Nie udało się pobrać poświadczeń TURN',
+      fallback: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    });
   }
 });
 
@@ -100,11 +158,15 @@ io.on('connection', (socket) => {
             .find(key => networks[networkId][key].id === peerId);
         
         if (targetSocketId) {
+            console.log(`Przekazywanie sygnału od ${networks[networkId][socket.id].id} do ${peerId}`);
+            
             // Przekaż sygnał do docelowego klienta w tej samej sieci
             io.to(targetSocketId).emit('signal', {
                 peerId: networks[networkId][socket.id].id,
                 signal
             });
+        } else {
+            console.warn(`Nie znaleziono odbiorcy sygnału: ${peerId} w sieci ${networkId}`);
         }
     });
     
