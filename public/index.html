@@ -160,6 +160,89 @@
             transform: translateY(-10px) rotateX(5deg);
         }
 
+        .transfer-request-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(5px);
+            background-color: rgba(0, 0, 0, 0.3);
+            z-index: 10;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+        
+        .transfer-request-container.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        
+        #transfer-request-sender {
+            margin-bottom: 1rem;
+            font-weight: 500;
+        }
+        
+        #transfer-request-details {
+            margin: 1rem 0;
+        }
+        
+        .transfer-file-list {
+            max-height: 150px;
+            overflow-y: auto;
+            margin: 1rem 0;
+            text-align: left;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            background-color: rgba(255, 255, 255, 0.3);
+        }
+        
+        .transfer-file-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.3rem 0;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+        }
+        
+        .transfer-file-item:last-child {
+            border-bottom: none;
+        }
+        
+        .transfer-actions {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+        }
+        
+        .accept-btn {
+            background-color: var(--primary-color);
+            color: white;
+        }
+        
+        .reject-btn {
+            background-color: #e53935;
+            color: white;
+        }
+        
+        .transfer-actions button {
+            border: none;
+            border-radius: 2rem;
+            padding: 0.8rem 2rem;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+        }
+        
+        .transfer-actions button:hover {
+            transform: scale(1.05);
+        }
+
         .transfer-container {
             position: fixed;
             top: 0;
@@ -232,24 +315,6 @@
             margin-bottom: 2rem;
             font-size: 0.9rem;
             color: var(--light-text);
-        }
-
-        .transfer-actions button {
-            background-color: var(--primary-color);
-            color: white;
-            border: none;
-            border-radius: 2rem;
-            padding: 0.8rem 2rem;
-            font-size: 1rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            box-shadow: 0 2px 10px rgba(0, 113, 227, 0.3);
-        }
-
-        .transfer-actions button:hover {
-            background-color: #0062c9;
-            transform: scale(1.05);
         }
 
         .toast-container {
@@ -364,6 +429,25 @@
             </div>
         </div>
     </main>
+    
+    <div class="transfer-request-container" id="transfer-request-container">
+        <div class="transfer-panel">
+            <div class="transfer-icon">📥</div>
+            <div class="transfer-title">Przychodzący transfer plików</div>
+            <div id="transfer-request-sender">Od: Nieznany</div>
+            <div id="transfer-request-details">
+                <p>Prośba o przesłanie <span id="transfer-file-count">0</span> plików</p>
+                <p>Łączna wielkość: <span id="transfer-total-size">0 B</span></p>
+            </div>
+            <div class="transfer-file-list" id="transfer-file-list">
+                <!-- Lista plików będzie wygenerowana dynamicznie -->
+            </div>
+            <div class="transfer-actions">
+                <button id="accept-transfer" class="accept-btn">Akceptuj</button>
+                <button id="reject-transfer" class="reject-btn">Odrzuć</button>
+            </div>
+        </div>
+    </div>
     
     <div class="transfer-container" id="transfer-container">
         <div class="transfer-panel">
@@ -697,6 +781,82 @@
             const client = new SendItClient();
             const particleTransfer = new ParticleTransfer();
             
+            // Elementy UI dla żądań transferu
+            const transferRequestContainer = document.getElementById('transfer-request-container');
+            const transferRequestSender = document.getElementById('transfer-request-sender');
+            const transferFileCount = document.getElementById('transfer-file-count');
+            const transferTotalSize = document.getElementById('transfer-total-size');
+            const transferFileList = document.getElementById('transfer-file-list');
+            const acceptTransferBtn = document.getElementById('accept-transfer');
+            const rejectTransferBtn = document.getElementById('reject-transfer');
+            
+            // Zmienna do przechowywania bieżącego żądania transferu
+            let currentTransferRequest = null;
+            
+            // Obsługa żądań transferu plików
+            client.onTransferRequest = (peerId, request) => {
+                // Zapisz bieżące żądanie transferu
+                currentTransferRequest = { peerId, request };
+                
+                // Wypełnij dialog informacjami o transferze
+                transferRequestSender.textContent = `Od: ${request.senderName}`;
+                transferFileCount.textContent = request.files.length;
+                transferTotalSize.textContent = formatFileSize(request.totalSize);
+                
+                // Wypełnij listę plików
+                transferFileList.innerHTML = '';
+                request.files.forEach(file => {
+                    const fileItem = document.createElement('div');
+                    fileItem.className = 'transfer-file-item';
+                    fileItem.innerHTML = `
+                        <span>${file.name}</span>
+                        <span>${formatFileSize(file.size)}</span>
+                    `;
+                    transferFileList.appendChild(fileItem);
+                });
+                
+                // Pokaż dialog żądania transferu
+                transferRequestContainer.classList.add('active');
+            };
+            
+            // Obsługa przycisku akceptacji transferu
+            acceptTransferBtn.addEventListener('click', () => {
+                if (currentTransferRequest) {
+                    const { peerId } = currentTransferRequest;
+                    
+                    // Ukryj dialog
+                    transferRequestContainer.classList.remove('active');
+                    
+                    // Wyślij akceptację
+                    client.respondToTransferRequest(peerId, true);
+                    
+                    // Pokaż toast informacyjny
+                    showToast('Transfer zaakceptowany', 'Rozpoczynanie odbierania plików...', 'info');
+                    
+                    // Wyczyść bieżące żądanie
+                    currentTransferRequest = null;
+                }
+            });
+            
+            // Obsługa przycisku odrzucenia transferu
+            rejectTransferBtn.addEventListener('click', () => {
+                if (currentTransferRequest) {
+                    const { peerId } = currentTransferRequest;
+                    
+                    // Ukryj dialog
+                    transferRequestContainer.classList.remove('active');
+                    
+                    // Wyślij odrzucenie
+                    client.respondToTransferRequest(peerId, false);
+                    
+                    // Pokaż toast informacyjny
+                    showToast('Transfer odrzucony', 'Odrzucono przesyłanie plików', 'warning');
+                    
+                    // Wyczyść bieżące żądanie
+                    currentTransferRequest = null;
+                }
+            });
+            
             // Obsługa przycisku wyboru plików
             uploadBtn.addEventListener('click', () => {
                 fileInput.click();
@@ -785,7 +945,7 @@
                 };
                 
                 // Obsługa postępu transferu
-                client.onTransferProgress = (peerId, file, progress, transferred, isReceiving = false) => {
+                client.onTransferProgress = (peerId, file, progress, transferred, isReceiving = false, bytesPerSecond = 0) => {
                     const peerElement = document.querySelector(`[data-peer-id="${peerId}"]`);
                     
                     if (!transferContainer.classList.contains('active')) {
@@ -806,10 +966,15 @@
                     progressBar.style.width = `${progress}%`;
                     transferPercentage.textContent = `${Math.round(progress)}%`;
                     
-                    // Obliczenie prędkości (przybliżone)
-                    if (file.size && transferred) {
-                        const speed = transferred / 1024 / 1024; // MB
-                        transferSpeed.textContent = `${speed.toFixed(1)} MB/s`;
+                    // Wyświetlenie prędkości transferu
+                    if (bytesPerSecond > 0) {
+                        transferSpeed.textContent = `${formatFileSize(bytesPerSecond)}/s`;
+                    } else {
+                        // Obliczenie prędkości (przybliżone)
+                        if (file.size && transferred) {
+                            const speed = transferred / 1024 / 1024; // MB
+                            transferSpeed.textContent = `${speed.toFixed(1)} MB/s`;
+                        }
                     }
                 };
                 
@@ -871,14 +1036,30 @@
                 // Obsługa anulowania transferu
                 cancelTransfer.addEventListener('click', () => {
                     transferContainer.classList.remove('active');
-                    showToast('Transfer anulowany', 'Transfer plików został anulowany', 'warning');
-                    // TODO: Dodać faktyczne anulowanie transferu w kliencie WebRTC
+                    
+                    // Anuluj transfer jeśli jest aktywny
+                    if (client.currentTransfer) {
+                        const peerId = client.currentTransfer.peerId;
+                        client.cancelTransfer(peerId);
+                        showToast('Transfer anulowany', 'Transfer plików został anulowany', 'warning');
+                    } else {
+                        showToast('Transfer anulowany', 'Transfer plików został anulowany', 'warning');
+                    }
                 });
                 
             } catch (error) {
                 connectionStatus.textContent = 'Błąd połączenia';
                 showToast('Błąd połączenia', error.message, 'error');
                 console.error('Błąd inicjalizacji:', error);
+            }
+            
+            // Pomocnicza funkcja do formatowania rozmiaru plików
+            function formatFileSize(bytes) {
+                if (bytes === undefined || bytes === null) return '0 B';
+                if (bytes < 1024) return bytes + ' B';
+                else if (bytes < 1048576) return (bytes / 1024).toFixed(2) + ' KB';
+                else if (bytes < 1073741824) return (bytes / 1048576).toFixed(2) + ' MB';
+                else return (bytes / 1073741824).toFixed(2) + ' GB';
             }
             
             // Pokaż toast powitalny
