@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SendIt - Bezprzewodowe Udostępnianie Plików</title>
+    <style>
+        :root {
+            --primary-color: #0071e3;
+            --secondary-color: #86c0fc;
+            --light-bg: #f5f5f7;
+            --dark-text: #1d1d1f;
+            --light-text: #86868b;
+            --shadow-color: rgba(0, 0, 0, 0.1);
+            --glass-bg: rgba(255, 255, 255, 0.7);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+        }
+
+        body {
+            background: linear-gradient(120deg, #f5f5f7, #e5e5e7);
+            color: var(--dark-text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+        }
+
+        #background-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            opacity: 0.4;
+        }
+
+        header {
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .logo {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+
+        .tagline {
+            color: var(--light-text);
+            font-size: 1.2rem;
+            font-weight: 300;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+
+        .devices-container {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 2rem;
+            margin: 2rem 0;
+            width: 100%;
+            max-width: 1200px;
+        }
+
+        .self-device {
+            backdrop-filter: blur(10px);
+            background-color: var(--glass-bg);
+            border-radius: 1.5rem;
+            padding: 2rem;
+            width: 300px;
+            box-shadow: 0 10px 30px var(--shadow-color);
+            text-align: center;
+            transform-style: preserve-3d;
+            transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .self-device:hover {
+            transform: translateY(-10px) rotateX(5deg);
+        }
+
+        .device-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: var(--primary-color);
+        }
+
+        .device-name {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .device-status {
+            color: var(--light-text);
+            margin-bottom: 1.5rem;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .upload-btn {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 2rem;
+            padding: 0.8rem 2rem;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 10px rgba(0, 113, 227, 0.3);
+        }
+
+        .upload-btn:hover {
+            background-color: #0062c9;
+            transform: scale(1.05);
+            box-shadow: 0 5px 15px rgba(0, 113, 227, 0.4);
+        }
+
+        .other-device {
+            backdrop-filter: blur(10px);
+            background-color: var(--glass-bg);
+            border-radius: 1.5rem;
+            padding: 2rem;
+            width: 300px;
+            box-shadow: 0 10px 30px var(--shadow-color);
+            text-align: center;
+            transform-style: preserve-3d;
+            transition: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            opacity: 0;
+            transform: scale(0.9);
+            cursor: pointer;
+        }
+
+        .other-device.visible {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .other-device:hover {
+            transform: translateY(-10px) rotateX(5deg);
+        }
+
+        .transfer-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(5px);
+            background-color: rgba(0, 0, 0, 0.3);
+            z-index: 10;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+
+        .transfer-container.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .transfer-panel {
+            backdrop-filter: blur(20px);
+            background-color: var(--glass-bg);
+            border-radius: 1.5rem;
+            padding: 2rem;
+            width: 400px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            transform: translateY(30px);
+            transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .transfer-container.active .transfer-panel {
+            transform: translateY(0);
+        }
+
+        .transfer-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: var(--primary-color);
+        }
+
+        .transfer-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .transfer-progress {
+            width: 100%;
+            height: 6px;
+            background-color: rgba(0, 0, 0, 0.1);
+            border-radius: 3px;
+            margin: 1.5rem 0;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background-color: var(--primary-color);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .transfer-details {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 2rem;
+            font-size: 0.9rem;
+            color: var(--light-text);
+        }
+
+        .transfer-actions button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 2rem;
+            padding: 0.8rem 2rem;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 10px rgba(0, 113, 227, 0.3);
+        }
+
+        .transfer-actions button:hover {
+            background-color: #0062c9;
+            transform: scale(1.05);
+        }
+
+        .toast-container {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            z-index: 100;
+        }
+
+        .toast {
+            backdrop-filter: blur(10px);
+            background-color: var(--glass-bg);
+            border-radius: 1rem;
+            padding: 1rem 1.5rem;
+            min-width: 300px;
+            box-shadow: 0 10px 30px var(--shadow-color);
+            display: flex;
+            align-items: center;
+            transform: translateX(150%);
+            transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .toast.show {
+            transform: translateX(0);
+        }
+
+        .toast-icon {
+            font-size: 1.5rem;
+            margin-right: 1rem;
+            color: var(--primary-color);
+        }
+
+        .toast-content {
+            flex: 1;
+        }
+
+        .toast-title {
+            font-weight: 600;
+            margin-bottom: 0.2rem;
+        }
+
+        .toast-message {
+            font-size: 0.9rem;
+            color: var(--light-text);
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--light-text);
+            font-size: 0.9rem;
+        }
+        
+        /* Animacja transferu cząstek */
+        .particles-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 15;
+        }
+        
+        .particle {
+            position: absolute;
+            background-color: var(--primary-color);
+            border-radius: 50%;
+            pointer-events: none;
+        }
+
+        @media (max-width: 768px) {
+            .devices-container {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .self-device, .other-device {
+                width: 100%;
+                max-width: 350px;
+            }
+        }
+
+        /* Animacje */
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="background-canvas"></canvas>
+    <div class="particles-container" id="particles-container"></div>
+    
+    <header>
+        <div class="logo">SendIt</div>
+        <div class="tagline">Bezprzewodowe udostępnianie plików w sieci WiFi</div>
+    </header>
+    
+    <main>
+        <div class="devices-container" id="devices-container">
+            <div class="self-device">
+                <div class="device-icon">📱</div>
+                <div class="device-name" id="self-device-name">Twoje urządzenie</div>
+                <div class="device-status" id="connection-status">Inicjalizacja...</div>
+                <input type="file" id="file-input" class="file-input" multiple>
+                <button class="upload-btn" id="upload-btn">Wybierz pliki</button>
+            </div>
+        </div>
+    </main>
+    
+    <div class="transfer-container" id="transfer-container">
+        <div class="transfer-panel">
+            <div class="transfer-icon" id="transfer-direction-icon">📤</div>
+            <div class="transfer-title" id="transfer-title">Wysyłanie pliku</div>
+            <div id="transfer-filename">example.jpg</div>
+            <div class="transfer-progress">
+                <div class="progress-bar" id="progress-bar"></div>
+            </div>
+            <div class="transfer-details">
+                <span id="transfer-percentage">0%</span>
+                <span id="transfer-speed">0 MB/s</span>
+            </div>
+            <div class="transfer-actions">
+                <button id="cancel-transfer">Anuluj</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="toast-container" id="toast-container">
+        <!-- Powiadomienia będą dodawane dynamicznie -->
+    </div>
+    
+    <footer>
+        <p>SendIt &copy; 2025 - Łatwe udostępnianie plików</p>
+    </footer>
+
+    <!-- Skrypty -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/simple-peer@9.11.1/simplepeer.min.js"></script>
+    <script src="/js/webrtc-client.js"></script>
+    
+    <script>
+        // Interaktywne tło z animacją cząsteczek
+        (function() {
+            const canvas = document.getElementById('background-canvas');
+            const ctx = canvas.getContext('2d');
+            let width = canvas.width = window.innerWidth;
+            let height = canvas.height = window.innerHeight;
+            let particles = [];
+            let mouseX = width / 2;
+            let mouseY = height / 2;
+            
+            // Ustawienia cząsteczek
+            const particleCount = 100;
+            const particleBaseRadius = 2;
+            const particleVariance = 1;
+            const baseSpeed = 0.2;
+            const mouseMoveRadius = 150;
+            const mouseMoveForce = 0.1;
+            
+            // Śledzenie ruchu myszy
+            window.addEventListener('mousemove', (e) => {
+                mouseX = e.clientX;
+                mouseY = e.clientY;
+            });
+            
+            window.addEventListener('resize', () => {
+                width = canvas.width = window.innerWidth;
+                height = canvas.height = window.innerHeight;
+                initParticles();
+            });
+            
+            class Particle {
+                constructor() {
+                    this.reset();
+                }
+                
+                reset() {
+                    this.x = Math.random() * width;
+                    this.y = Math.random() * height;
+                    this.size = particleBaseRadius + Math.random() * particleVariance;
+                    this.speedX = (Math.random() - 0.5) * baseSpeed;
+                    this.speedY = (Math.random() - 0.5) * baseSpeed;
+                    this.opacity = 0.2 + Math.random() * 0.3;
+                    this.color = `rgba(0, 113, 227, ${this.opacity})`;
+                }
+                
+                update() {
+                    // Standardowy ruch cząsteczki
+                    this.x += this.speedX;
+                    this.y += this.speedY;
+                    
+                    // Reakcja na mysz
+                    const dx = this.x - mouseX;
+                    const dy = this.y - mouseY;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance < mouseMoveRadius) {
+                        const force = (mouseMoveRadius - distance) / mouseMoveRadius;
+                        const angle = Math.atan2(dy, dx);
+                        this.x += Math.cos(angle) * force * mouseMoveForce;
+                        this.y += Math.sin(angle) * force * mouseMoveForce;
+                    }
+                    
+                    // Granice ekranu
+                    if (this.x < 0 || this.x > width || this.y < 0 || this.y > height) {
+                        this.reset();
+                    }
+                }
+                
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                    ctx.fillStyle = this.color;
+                    ctx.fill();
+                }
+            }
+            
+            function initParticles() {
+                particles = [];
+                for (let i = 0; i < particleCount; i++) {
+                    particles.push(new Particle());
+                }
+            }
+            
+            function connectParticles() {
+                const connectionRadius = 100;
+                
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const dx = particles[i].x - particles[j].x;
+                        const dy = particles[i].y - particles[j].y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        
+                        if (distance < connectionRadius) {
+                            const opacity = 1 - (distance / connectionRadius);
+                            ctx.beginPath();
+                            ctx.moveTo(particles[i].x, particles[i].y);
+                            ctx.lineTo(particles[j].x, particles[j].y);
+                            ctx.strokeStyle = `rgba(0, 113, 227, ${opacity * 0.15})`;
+                            ctx.lineWidth = 1;
+                            ctx.stroke();
+                        }
+                    }
+                }
+            }
+            
+            function animate() {
+                ctx.clearRect(0, 0, width, height);
+                
+                particles.forEach(p => {
+                    p.update();
+                    p.draw();
+                });
+                
+                connectParticles();
+                requestAnimationFrame(animate);
+            }
+            
+            initParticles();
+            animate();
+        })();
+        
+        // Animacja transferu plików
+        class ParticleTransfer {
+            constructor() {
+                this.container = document.getElementById('particles-container');
+                this.active = false;
+                this.particles = [];
+                this.fromElement = null;
+                this.toElement = null;
+                this.particleCount = 30;
+                this.duration = 1500;
+            }
+            
+            startTransfer(fromElement, toElement) {
+                this.active = true;
+                this.fromElement = fromElement;
+                this.toElement = toElement;
+                this.createParticles();
+                this.animate();
+            }
+            
+            createParticles() {
+                // Wyczyść istniejące cząsteczki
+                this.container.innerHTML = '';
+                this.particles = [];
+                
+                const fromRect = this.fromElement.getBoundingClientRect();
+                const toRect = this.toElement.getBoundingClientRect();
+                
+                // Początkowa pozycja
+                const startX = fromRect.left + fromRect.width / 2;
+                const startY = fromRect.top + fromRect.height / 2;
+                
+                // Końcowa pozycja
+                const endX = toRect.left + toRect.width / 2;
+                const endY = toRect.top + toRect.height / 2;
+                
+                for (let i = 0; i < this.particleCount; i++) {
+                    const particle = document.createElement('div');
+                    particle.className = 'particle';
+                    
+                    // Losowe właściwości
+                    const size = Math.random() * 6 + 2;
+                    const speedFactor = Math.random() * 0.4 + 0.8;
+                    const delay = Math.random() * 400;
+                    
+                    particle.style.width = `${size}px`;
+                    particle.style.height = `${size}px`;
+                    particle.style.left = `${startX}px`;
+                    particle.style.top = `${startY}px`;
+                    particle.style.opacity = '0';
+                    
+                    this.container.appendChild(particle);
+                    
+                    this.particles.push({
+                        element: particle,
+                        startX,
+                        startY,
+                        endX,
+                        endY,
+                        delay,
+                        speedFactor,
+                        progress: 0
+                    });
+                }
+            }
+            
+            animate() {
+                if (!this.active) return;
+                
+                let allComplete = true;
+                
+                this.particles.forEach(particle => {
+                    if (particle.progress < 1) {
+                        allComplete = false;
+                        
+                        if (particle.delay > 0) {
+                            particle.delay -= 16.7; // Przybliżony interwał requestAnimationFrame
+                            return;
+                        }
+                        
+                        particle.progress += 0.01 * particle.speedFactor;
+                        if (particle.progress > 1) particle.progress = 1;
+                        
+                        // Funkcja łagodzenia dla bardziej naturalnego ruchu
+                        const easeOutQuad = t => t * (2 - t);
+                        const easedProgress = easeOutQuad(particle.progress);
+                        
+                        // Obliczenie pozycji na krzywej
+                        const x = particle.startX + (particle.endX - particle.startX) * easedProgress;
+                        const y = particle.startY + (particle.endY - particle.startY) * easedProgress;
+                        
+                        // Dodaj łuk do ścieżki
+                        const curveHeight = 100;
+                        const arc = Math.sin(particle.progress * Math.PI) * curveHeight;
+                        const arcX = (particle.endX - particle.startX) * 0.3;
+                        const arcY = -arc;
+                        
+                        // Zastosuj pozycję do cząsteczki
+                        particle.element.style.left = `${x + arcX * (Math.random() - 0.5)}px`;
+                        particle.element.style.top = `${y + arcY}px`;
+                        
+                        // Animacja przezroczystości
+                        if (particle.progress < 0.1) {
+                            particle.element.style.opacity = (particle.progress / 0.1).toString();
+                        } else if (particle.progress > 0.9) {
+                            particle.element.style.opacity = (1 - (particle.progress - 0.9) / 0.1).toString();
+                        } else {
+                            particle.element.style.opacity = '1';
+                        }
+                    }
+                });
+                
+                if (allComplete) {
+                    setTimeout(() => {
+                        this.container.innerHTML = '';
+                        this.active = false;
+                    }, 100);
+                } else {
+                    requestAnimationFrame(() => this.animate());
+                }
+            }
+        }
+        
+        // System powiadomień
+        const toastContainer = document.getElementById('toast-container');
+        
+        function showToast(title, message, type = 'info', duration = 3000) {
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            
+            let iconType = '📌';
+            if (type === 'success') iconType = '✅';
+            if (type === 'error') iconType = '❌';
+            if (type === 'warning') iconType = '⚠️';
+            
+            toast.innerHTML = `
+                <div class="toast-icon">${iconType}</div>
+                <div class="toast-content">
+                    <div class="toast-title">${title}</div>
+                    <div class="toast-message">${message}</div>
+                </div>
+            `;
+            
+            toastContainer.appendChild(toast);
+            
+            // Pokazanie z animacją
+            setTimeout(() => {
+                toast.classList.add('show');
+            }, 10);
+            
+            // Usunięcie po czasie
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => {
+                    toastContainer.removeChild(toast);
+                }, 500);
+            }, duration);
+        }
+        
+        // ======= Inicjalizacja aplikacji =======
+        document.addEventListener('DOMContentLoaded', async () => {
+            const connectionStatus = document.getElementById('connection-status');
+            const selfDeviceName = document.getElementById('self-device-name');
+            const fileInput = document.getElementById('file-input');
+            const uploadBtn = document.getElementById('upload-btn');
+            const deviceContainer = document.getElementById('devices-container');
+            const transferContainer = document.getElementById('transfer-container');
+            const progressBar = document.getElementById('progress-bar');
+            const transferPercentage = document.getElementById('transfer-percentage');
+            const transferSpeed = document.getElementById('transfer-speed');
+            const transferFilename = document.getElementById('transfer-filename');
+            const transferTitle = document.getElementById('transfer-title');
+            const transferDirectionIcon = document.getElementById('transfer-direction-icon');
+            const cancelTransfer = document.getElementById('cancel-transfer');
+            
+            // Inicjalizacja klienta SendIt
+            const client = new SendItClient();
+            const particleTransfer = new ParticleTransfer();
+            
+            // Obsługa przycisku wyboru plików
+            uploadBtn.addEventListener('click', () => {
+                fileInput.click();
+            });
+            
+            // Generowanie nazwy urządzenia
+            function generateDeviceName() {
+                const deviceType = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+                    ? 'Telefon'
+                    : 'Komputer';
+                
+                const randomId = Math.floor(Math.random() * 9000) + 1000;
+                return `${deviceType} ${randomId}`;
+            }
+            
+            // Próba odczytania nazwy urządzenia z localStorage lub generowanie nowej
+            let deviceName = localStorage.getItem('sendit-device-name');
+            if (!deviceName) {
+                deviceName = generateDeviceName();
+                localStorage.setItem('sendit-device-name', deviceName);
+            }
+            
+            selfDeviceName.textContent = deviceName;
+            
+            // Inicjalizacja klienta WebRTC
+            try {
+                connectionStatus.textContent = 'Łączenie...';
+                
+                await client.init();
+                client.registerDevice(deviceName);
+                
+                connectionStatus.textContent = 'Połączono z siecią';
+                showToast('Połączono', 'Połączono z siecią SendIt', 'success');
+                
+                // Obsługa aktualizacji listy urządzeń
+                client.onPeersUpdated = (peers) => {
+                    // Usuń obecne urządzenia (poza własnym)
+                    Array.from(deviceContainer.children).forEach(child => {
+                        if (!child.classList.contains('self-device')) {
+                            deviceContainer.removeChild(child);
+                        }
+                    });
+                    
+                    // Dodaj wszystkie aktywne urządzenia
+                    peers.forEach(peer => {
+                        const deviceElement = document.createElement('div');
+                        deviceElement.className = 'other-device';
+                        deviceElement.dataset.peerId = peer.id;
+                        deviceElement.innerHTML = `
+                            <div class="device-icon">💻</div>
+                            <div class="device-name">${peer.name}</div>
+                            <div class="device-status">Dostępny</div>
+                        `;
+                        
+                        deviceContainer.appendChild(deviceElement);
+                        
+                        // Animacja pojawienia się
+                        setTimeout(() => {
+                            deviceElement.classList.add('visible');
+                        }, 100);
+                        
+                        // Obsługa kliknięcia na urządzenie
+                        deviceElement.addEventListener('click', () => {
+                            // Jeśli pliki zostały wybrane, rozpocznij transfer
+                            if (fileInput.files.length > 0) {
+                                // Symulacja animacji transferu
+                                const selfDevice = document.querySelector('.self-device');
+                                particleTransfer.startTransfer(selfDevice, deviceElement);
+                                
+                                sendFilesToPeer(peer.id, peer.name);
+                            } else {
+                                showToast('Wybierz pliki', 'Najpierw wybierz pliki do udostępnienia', 'warning');
+                            }
+                        });
+                    });
+                };
+                
+                // Obsługa nowo połączonego urządzenia
+                client.onPeerConnected = (peer) => {
+                    showToast('Nowe urządzenie', `Wykryto: ${peer.name}`, 'info');
+                };
+                
+                // Obsługa urządzenia, które się rozłączyło
+                client.onPeerDisconnected = (peer) => {
+                    showToast('Urządzenie odłączone', `${peer.name} opuścił sieć`, 'warning');
+                };
+                
+                // Obsługa postępu transferu
+                client.onTransferProgress = (peerId, file, progress, transferred, isReceiving = false) => {
+                    const peerElement = document.querySelector(`[data-peer-id="${peerId}"]`);
+                    
+                    if (!transferContainer.classList.contains('active')) {
+                        // Pokaż panel transferu
+                        transferContainer.classList.add('active');
+                        transferFilename.textContent = file.name;
+                        
+                        if (isReceiving) {
+                            transferTitle.textContent = `Odbieranie od: ${peerElement ? peerElement.querySelector('.device-name').textContent : 'Innego urządzenia'}`;
+                            transferDirectionIcon.textContent = '📥';
+                        } else {
+                            transferTitle.textContent = `Wysyłanie do: ${peerElement ? peerElement.querySelector('.device-name').textContent : 'Innego urządzenia'}`;
+                            transferDirectionIcon.textContent = '📤';
+                        }
+                    }
+                    
+                    // Aktualizacja wskaźnika postępu
+                    progressBar.style.width = `${progress}%`;
+                    transferPercentage.textContent = `${Math.round(progress)}%`;
+                    
+                    // Obliczenie prędkości (przybliżone)
+                    if (file.size && transferred) {
+                        const speed = transferred / 1024 / 1024; // MB
+                        transferSpeed.textContent = `${speed.toFixed(1)} MB/s`;
+                    }
+                };
+                
+                // Obsługa zakończenia transferu
+                client.onTransferComplete = (peerId, file) => {
+                    setTimeout(() => {
+                        transferContainer.classList.remove('active');
+                        showToast('Transfer zakończony', `Plik "${file.name}" został wysłany`, 'success');
+                    }, 500);
+                };
+                
+                // Obsługa błędów transferu
+                client.onTransferError = (peerId, errorMessage) => {
+                    transferContainer.classList.remove('active');
+                    showToast('Błąd transferu', errorMessage, 'error');
+                };
+                
+                // Obsługa otrzymanych plików
+                client.onFilesReceived = (peerId, files) => {
+                    transferContainer.classList.remove('active');
+                    
+                    files.forEach(file => {
+                        // Utworzenie URL dla pliku
+                        const fileUrl = URL.createObjectURL(file.data);
+                        
+                        // Utwórz element do pobrania
+                        const a = document.createElement('a');
+                        a.href = fileUrl;
+                        a.download = file.name;
+                        a.style.display = 'none';
+                        document.body.appendChild(a);
+                        
+                        // Pobierz plik
+                        a.click();
+                        
+                        // Wyczyść
+                        URL.revokeObjectURL(fileUrl);
+                        document.body.removeChild(a);
+                    });
+                    
+                    const peerName = document.querySelector(`[data-peer-id="${peerId}"]`)?.querySelector('.device-name')?.textContent || 'Innego urządzenia';
+                    showToast('Pliki odebrane', `Otrzymano ${files.length} plików od ${peerName}`, 'success');
+                };
+                
+                // Funkcja do wysyłania plików do peera
+                async function sendFilesToPeer(peerId, peerName) {
+                    try {
+                        const files = fileInput.files;
+                        if (files.length === 0) return;
+                        
+                        showToast('Inicjalizacja transferu', `Przygotowanie do wysyłania ${files.length} plików do ${peerName}`, 'info');
+                        
+                        await client.sendFiles(peerId, files);
+                    } catch (error) {
+                        showToast('Błąd', error.message, 'error');
+                    }
+                }
+                
+                // Obsługa anulowania transferu
+                cancelTransfer.addEventListener('click', () => {
+                    transferContainer.classList.remove('active');
+                    showToast('Transfer anulowany', 'Transfer plików został anulowany', 'warning');
+                    // TODO: Dodać faktyczne anulowanie transferu w kliencie WebRTC
+                });
+                
+            } catch (error) {
+                connectionStatus.textContent = 'Błąd połączenia';
+                showToast('Błąd połączenia', error.message, 'error');
+                console.error('Błąd inicjalizacji:', error);
+            }
+            
+            // Pokaż toast powitalny
+            setTimeout(() => {
+                showToast('Witaj w SendIt', 'Udostępniaj pliki bezpośrednio w swojej sieci WiFi', 'info');
+            }, 500);
+        });
+    </script>
+</body>
+</html>
