@@ -14,12 +14,13 @@ class SendItClient {
         this.onTransferError = null;
         this.onFilesReceived = null;
         this.onPeersUpdated = null;
-        this.onTransferRequest = null; // Nowy callback dla żądań transferu
+        this.onTransferRequest = null; // Callback dla żądań transferu
         this.connectionRetryCount = 0;
-        this.maxConnectionRetries = 3;
+        this.maxConnectionRetries = 5; // Zwiększenie liczby prób
         this.useFallbackIceServers = false;
         this.isConnecting = {}; // Śledzenie stanu łączenia dla każdego ID peera
         this.pendingTransfers = {}; // Śledzenie oczekujących transferów
+        this.iceFailedPeers = new Set(); // Śledzenie peerów z błędami ICE
     }
 
     // Inicjalizacja połączenia z serwerem sygnalizacyjnym
@@ -83,6 +84,7 @@ class SendItClient {
                     
                     // Usuń oczekujące transfery
                     delete this.pendingTransfers[peerId];
+                    this.iceFailedPeers.delete(peerId);
                     
                     if (this.onPeerDisconnected && peer) {
                         this.onPeerDisconnected(peer);
@@ -143,16 +145,34 @@ class SendItClient {
 
     // Pobieranie konfiguracji ICE serwerów z gwarancją fallbacku
     async getIceServers() {
-        // Awaryjne serwery ICE - zawsze działające podstawowe STUN
-        const fallbackServers = [
+        // Rozszerzony zestaw publicznych serwerów STUN/TURN jako fallback
+        const publicServers = [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            {
+                urls: 'turn:numb.viagenie.ca',
+                username: 'webrtc@live.com',
+                credential: 'muazkh'
+            },
+            {
+                urls: 'turn:openrelay.metered.ca:80',
+                username: 'openrelayproject',
+                credential: 'openrelayproject'
+            },
+            {
+                urls: 'turn:openrelay.metered.ca:443',
+                username: 'openrelayproject',
+                credential: 'openrelayproject'
+            }
         ];
 
-        // Jeśli ustawiono flagę awaryjną, użyj tylko podstawowych serwerów STUN
+        // Jeśli ustawiono flagę awaryjną, użyj tylko podstawowych serwerów STUN/TURN
         if (this.useFallbackIceServers) {
-            console.log('Używam awaryjnych serwerów ICE (tylko STUN)');
-            return fallbackServers;
+            console.log('Używam awaryjnych serwerów ICE');
+            return publicServers;
         }
 
         try {
@@ -167,21 +187,22 @@ class SendItClient {
             
             if (!response.ok) {
                 console.warn('Serwer zwrócił błąd:', data.error);
-                return fallbackServers;
+                return publicServers;
             }
             
             if (!Array.isArray(data) || data.length === 0) {
                 console.warn('Otrzymano nieprawidłowe dane z serwera TURN:', data);
-                return fallbackServers;
+                return publicServers;
             }
             
             console.log(`Pobrano ${data.length} serwerów ICE:`, 
                 data.map(server => server.urls).join(', '));
             
-            return data;
+            // Połącz serwery z API z publicznymi serwerami dla większej niezawodności
+            return [...data, ...publicServers];
         } catch (error) {
             console.error('Błąd podczas pobierania poświadczeń TURN:', error);
-            return fallbackServers;
+            return publicServers;
         }
     }
 
@@ -216,7 +237,16 @@ class SendItClient {
                 config: { 
                     iceServers,
                     iceTransportPolicy: 'all',
-                    sdpSemantics: 'unified-plan'
+                    sdpSemantics: 'unified-plan',
+                    iceCandidatePoolSize: 10,
+                    bundlePolicy: 'max-bundle'
+                },
+                sdpTransform: (sdp) => {
+                    // Zwiększenie priorytetów dla różnych typów kandydatów ICE
+                    sdp = sdp.replace(/a=candidate:.*udp.*typ host.*\r\n/g, (match) => {
+                        return match.replace(/generation [0-9]+ /, 'generation 0 ');
+                    });
+                    return sdp;
                 }
             });
             
@@ -248,6 +278,9 @@ class SendItClient {
                     console.log('Przełączam na awaryjne serwery ICE');
                     this.useFallbackIceServers = true;
                     this.connectionRetryCount = 0;
+                    
+                    // Oznacz tego peera jako problematycznego
+                    this.iceFailedPeers.add(targetPeerId);
                     
                     // Usuń obecne połączenie
                     this.cleanupConnection(targetPeerId, peer);
@@ -300,7 +333,13 @@ class SendItClient {
                 console.log(`Połączono z peerem: ${targetPeerId}`);
                 // Resetuj licznik prób po udanym połączeniu
                 this.connectionRetryCount = 0;
-                this.useFallbackIceServers = false; // Resetuj flagę awaryjną
+                
+                // Jeśli to był peer z problemami ICE, możemy zresetować flagę
+                if (this.iceFailedPeers.has(targetPeerId)) {
+                    this.iceFailedPeers.delete(targetPeerId);
+                    // Nie resetuj globalnej flagi useFallbackIceServers, może być potrzebna dla innych połączeń
+                }
+                
                 delete this.isConnecting[targetPeerId]; // Usuń znacznik nawiązywania połączenia
             });
             
@@ -321,9 +360,18 @@ class SendItClient {
                 // Jeśli stan ICE to 'failed', oznacza to problem z połączeniem
                 if (state === 'failed') {
                     console.error(`Połączenie ICE nie powiodło się dla ${targetPeerId}`);
+                    
+                    // Oznacz tego peera jako problematycznego
+                    this.iceFailedPeers.add(targetPeerId);
+                    
                     if (this.onTransferError) {
-                        this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia ICE.');
+                        this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia ICE. Spróbuj ponownie później.');
                     }
+                }
+                
+                // Jeśli połączenie przeszło do stanu connected, możemy zresetować flagi
+                if (state === 'connected' || state === 'completed') {
+                    this.iceFailedPeers.delete(targetPeerId);
                 }
             });
             
@@ -350,6 +398,16 @@ class SendItClient {
                         }
                     }
                 });
+                
+                // Dodanie obserwatora kandydatów ICE
+                peer._pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        console.log(`Nowy kandydat ICE dla ${targetPeerId}:`, 
+                            event.candidate.type, 
+                            event.candidate.protocol, 
+                            event.candidate.address);
+                    }
+                };
             }
             
             // Ustaw połączenie jako aktywne
@@ -394,6 +452,12 @@ class SendItClient {
     async requestFileTransfer(targetPeerId, files) {
         try {
             console.log(`Wysyłanie żądania transferu ${files.length} plików do ${targetPeerId}`);
+            
+            // Jeśli ten peer miał wcześniej problemy z ICE, użyj od razu serwerów awaryjnych
+            if (this.iceFailedPeers.has(targetPeerId)) {
+                this.useFallbackIceServers = true;
+                console.log(`Używam serwerów awaryjnych dla ${targetPeerId} z powodu wcześniejszych problemów ICE`);
+            }
             
             // Sprawdź, czy jest aktywne połączenie i czy jest gotowe
             let connection = this.activeConnections[targetPeerId];
@@ -924,6 +988,7 @@ class SendItClient {
         this.activeConnections = {};
         this.isConnecting = {};
         this.pendingTransfers = {};
+        this.iceFailedPeers.clear();
         
         if (this.socket) {
             this.socket.disconnect();
