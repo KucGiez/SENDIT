@@ -16,6 +16,7 @@ class SendItClient {
         this.onPeersUpdated = null;
         this.connectionRetryCount = 0;
         this.maxConnectionRetries = 3;
+        this.useFallbackIceServers = false; // Flaga do awaryjnego trybu
     }
 
     // Inicjalizacja połączenia z serwerem sygnalizacyjnym
@@ -84,7 +85,7 @@ class SendItClient {
                 // Obsługa wiadomości sygnalizacyjnych
                 this.socket.on('signal', async ({ peerId, signal }) => {
                     try {
-                        console.log(`Otrzymano sygnał od ${peerId}`);
+                        console.log(`Otrzymano sygnał od ${peerId}:`, signal.type || 'unknown');
                         
                         if (!this.activeConnections[peerId]) {
                             await this.createPeerConnection(peerId, false);
@@ -113,47 +114,130 @@ class SendItClient {
         this.socket.emit('register-name', name);
     }
 
+    // Pobieranie konfiguracji ICE serwerów z gwarancją fallbacku
+    async getIceServers() {
+        // Awaryjne serwery ICE - zawsze działające podstawowe STUN
+        const fallbackServers = [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ];
+
+        // Jeśli ustawiono flagę awaryjną, użyj tylko podstawowych serwerów STUN
+        if (this.useFallbackIceServers) {
+            console.log('Używam awaryjnych serwerów ICE (tylko STUN)');
+            return fallbackServers;
+        }
+
+        try {
+            console.log('Pobieranie poświadczeń TURN z serwera...');
+            const startTime = Date.now();
+            
+            const response = await fetch('/api/turn-credentials');
+            const responseTime = Date.now() - startTime;
+            console.log(`Otrzymano odpowiedź z serwera TURN w ${responseTime}ms`);
+            
+            const data = await response.json();
+            
+            if (!response.ok) {
+                console.warn('Serwer zwrócił błąd:', data.error);
+                return fallbackServers;
+            }
+            
+            if (!Array.isArray(data) || data.length === 0) {
+                console.warn('Otrzymano nieprawidłowe dane z serwera TURN:', data);
+                return fallbackServers;
+            }
+            
+            console.log(`Pobrano ${data.length} serwerów ICE:`, 
+                data.map(server => server.urls).join(', '));
+            
+            return data;
+        } catch (error) {
+            console.error('Błąd podczas pobierania poświadczeń TURN:', error);
+            return fallbackServers;
+        }
+    }
+
     // Utworzenie połączenia peer-to-peer
     async createPeerConnection(targetPeerId, isInitiator = true) {
         try {
             console.log(`Tworzenie połączenia peer z ${targetPeerId}, initiator: ${isInitiator}`);
             
-            // Pobranie dynamicznych poświadczeń TURN
-            let iceServers = [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ];
+            // Pobierz konfigurację ICE serwerów
+            const iceServers = await this.getIceServers();
             
-            try {
-                console.log('Pobieranie dynamicznych poświadczeń TURN...');
-                const response = await fetch('/api/turn-credentials');
-                if (response.ok) {
-                    const turnCredentials = await response.json();
-                    console.log('Pobrano dynamiczne poświadczenia TURN');
-                    iceServers = turnCredentials;
-                } else {
-                    console.warn('Nie udało się pobrać poświadczeń TURN, używam tylko serwerów STUN');
-                }
-            } catch (error) {
-                console.error('Błąd podczas pobierania poświadczeń TURN:', error);
-                console.warn('Używam tylko serwerów STUN jako fallback');
-            }
+            // Wyświetl pełną konfigurację do debugowania
+            console.log('Konfiguracja połączenia WebRTC:', {
+                initiator: isInitiator,
+                trickle: true,
+                iceTransportPolicy: 'all',
+                sdpSemantics: 'unified-plan',
+                iceServers: iceServers.map(server => ({ 
+                    urls: server.urls,
+                    // Ukryj dane uwierzytelniające z logów dla bezpieczeństwa
+                    ...(server.username ? { username: '***' } : {}),
+                    ...(server.credential ? { credential: '***' } : {})
+                }))
+            });
             
             const peer = new SimplePeer({
                 initiator: isInitiator,
                 trickle: true,
-                config: { iceServers },
-                sdpTransform: (sdp) => {
-                    console.log('Transformacja SDP dla lepszej kompatybilności');
-                    sdp = sdp.replace('useinbandfec=1', 'useinbandfec=1; stereo=1; maxaveragebitrate=510000');
-                    return sdp;
+                config: { 
+                    iceServers,
+                    iceTransportPolicy: 'all',
+                    sdpSemantics: 'unified-plan'
                 }
             });
             
+            // Śledź stan połączenia ICE
+            let iceConnectionState = null;
+            let iceGatheringState = null;
+            let signalingState = null;
+            
+            peer.on('signal', (data) => {
+                console.log(`Wysyłanie sygnału do ${targetPeerId}:`, data.type || 'unknown');
+                this.socket.emit('signal', {
+                    peerId: targetPeerId,
+                    signal: data
+                });
+            });
+            
             peer.on('error', (err) => {
-                console.error(`Błąd połączenia peer (${targetPeerId}):`, err);
+                console.error(`Błąd połączenia peer (${targetPeerId}):`, err.message);
                 
-                // Spróbuj ponownie nawiązać połączenie jeśli to możliwe
+                // Zgłoś szczegóły stanu połączenia
+                console.error(`Stan połączenia: ICE=${iceConnectionState}, gathering=${iceGatheringState}, signaling=${signalingState}`);
+                
+                // Jeśli połączenie nie powiodło się z obecnymi serwerami ICE, spróbuj z awaryjnymi
+                if (!this.useFallbackIceServers && this.connectionRetryCount >= this.maxConnectionRetries) {
+                    console.log('Przełączam na awaryjne serwery ICE');
+                    this.useFallbackIceServers = true;
+                    this.connectionRetryCount = 0;
+                    
+                    // Usuń obecne połączenie
+                    delete this.activeConnections[targetPeerId];
+                    
+                    // Zniszcz obiekt peer
+                    if (peer && typeof peer.destroy === 'function') {
+                        peer.destroy();
+                    }
+                    
+                    // Spróbuj ponownie z awaryjnymi serwerami
+                    setTimeout(() => {
+                        this.createPeerConnection(targetPeerId, isInitiator)
+                        .catch(fallbackError => {
+                            console.error('Nieudana próba z awaryjnymi serwerami:', fallbackError);
+                            if (this.onTransferError) {
+                                this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia nawet z awaryjnymi serwerami.');
+                            }
+                        });
+                    }, 1000);
+                    
+                    return;
+                }
+                
+                // Standardowa procedura ponownych prób
                 if (this.connectionRetryCount < this.maxConnectionRetries) {
                     console.log(`Próba ponownego połączenia ${this.connectionRetryCount + 1}/${this.maxConnectionRetries}`);
                     this.connectionRetryCount++;
@@ -161,7 +245,7 @@ class SendItClient {
                     // Usuń obecne połączenie i utwórz nowe
                     delete this.activeConnections[targetPeerId];
                     
-                    // Sprawdź czy obiekt peer istnieje i zniszcz go przed ponowną próbą
+                    // Zniszcz obiekt peer
                     if (peer && typeof peer.destroy === 'function') {
                         peer.destroy();
                     }
@@ -185,18 +269,11 @@ class SendItClient {
                 }
             });
             
-            peer.on('signal', (data) => {
-                console.log(`Wysyłanie sygnału do ${targetPeerId}`);
-                this.socket.emit('signal', {
-                    peerId: targetPeerId,
-                    signal: data
-                });
-            });
-            
             peer.on('connect', () => {
                 console.log(`Połączono z peerem: ${targetPeerId}`);
                 // Resetuj licznik prób po udanym połączeniu
                 this.connectionRetryCount = 0;
+                this.useFallbackIceServers = false; // Resetuj flagę awaryjną
             });
             
             peer.on('data', (data) => {
@@ -208,9 +285,36 @@ class SendItClient {
                 delete this.activeConnections[targetPeerId];
             });
             
+            // Dodatkowe monitorowanie stanu ICE
             peer.on('iceStateChange', (state) => {
+                iceConnectionState = state;
                 console.log(`Zmiana stanu ICE dla ${targetPeerId}:`, state);
+                
+                // Jeśli stan ICE to 'failed', oznacza to problem z połączeniem
+                if (state === 'failed') {
+                    console.error(`Połączenie ICE nie powiodło się dla ${targetPeerId}`);
+                    if (this.onTransferError) {
+                        this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia ICE.');
+                    }
+                }
             });
+            
+            // Dodatkowe monitorowanie jeśli peer udostępnia te informacje
+            if (peer._pc) {
+                peer._pc.addEventListener('icegatheringstatechange', () => {
+                    iceGatheringState = peer._pc.iceGatheringState;
+                    console.log(`Zmiana stanu zbierania ICE dla ${targetPeerId}:`, peer._pc.iceGatheringState);
+                });
+                
+                peer._pc.addEventListener('signalingstatechange', () => {
+                    signalingState = peer._pc.signalingState;
+                    console.log(`Zmiana stanu sygnalizacji dla ${targetPeerId}:`, peer._pc.signalingState);
+                });
+                
+                peer._pc.addEventListener('connectionstatechange', () => {
+                    console.log(`Zmiana stanu połączenia dla ${targetPeerId}:`, peer._pc.connectionState);
+                });
+            }
             
             this.activeConnections[targetPeerId] = peer;
             return peer;
