@@ -16,16 +16,21 @@ class SendItClient {
         this.onPeersUpdated = null;
         this.onTransferRequest = null; // Callback dla żądań transferu
         this.connectionRetryCount = 0;
-        this.maxConnectionRetries = 5; // Liczba prób połączenia
+        this.maxConnectionRetries = 10; // Zwiększona liczba prób
         this.useFallbackIceServers = false;
         this.isConnecting = {}; // Śledzenie stanu łączenia dla każdego ID peera
         this.pendingTransfers = {}; // Śledzenie oczekujących transferów
         this.iceFailedPeers = new Set(); // Śledzenie peerów z problemami ICE
+        this.connectionStates = {}; // Śledzenie stanów połączeń
         
         // Konfiguracja timeoutów i limitów
-        this.connectionTimeout = 60000; // 60 sekund na nawiązanie połączenia (zwiększone z 30s)
-        this.signalTimeout = 10000;    // 10 sekund na odebranie sygnału
+        this.connectionTimeout = 180000; // 3 minuty na nawiązanie połączenia
+        this.iceTimeout = 10000;       // 10 sekund na kandydatów ICE
+        this.signalTimeout = 15000;    // 15 sekund na odebranie sygnału
         this.chunkSize = 16384;        // 16KB dla fragmentów plików
+        
+        // Stan gotowości do odbioru wiadomości (nawet jeśli połączenie nie jest w pełni gotowe)
+        this.earlyMessageEnabled = true;
     }
 
     // Inicjalizacja połączenia z serwerem sygnalizacyjnym
@@ -101,6 +106,7 @@ class SendItClient {
                         }
                         delete this.activeConnections[peerId];
                         delete this.isConnecting[peerId];
+                        delete this.connectionStates[peerId];
                     }
                     
                     // Usuń oczekujące transfery
@@ -121,6 +127,19 @@ class SendItClient {
                     try {
                         console.log(`[DEBUG] Otrzymano sygnał od ${peerId}: ${signal.type || 'candidate'}`);
                         
+                        if (signal.type === 'offer') {
+                            // Otrzymanie nowej oferty - może wymagać stworzenia nowego połączenia
+                            if (this.activeConnections[peerId]) {
+                                // Jeśli połączenie już istnieje, ale otrzymaliśmy nową ofertę, 
+                                // może to być próba renegocjacji - lepiej zacząć od nowa
+                                console.log(`[DEBUG] Otrzymano nową ofertę dla istniejącego połączenia z ${peerId} - resetowanie`);
+                                this.cleanupConnection(peerId);
+                            }
+                            
+                            // Krótkie opóźnienie przed tworzeniem nowego połączenia
+                            await new Promise(resolve => setTimeout(resolve, 500));
+                        }
+                        
                         // Sprawdź czy połączenie już istnieje lub jest w trakcie tworzenia
                         if (!this.activeConnections[peerId] && !this.isConnecting[peerId]) {
                             // Oznacz, że rozpoczęto łączenie
@@ -138,7 +157,12 @@ class SendItClient {
                         // Zabezpieczenie przed przypadkiem, gdy połączenie mogło zostać usunięte w międzyczasie
                         if (this.activeConnections[peerId]) {
                             console.log(`[DEBUG] Przekazanie sygnału do obiektu peer dla ${peerId}`);
-                            await this.activeConnections[peerId].signal(signal);
+                            try {
+                                await this.activeConnections[peerId].signal(signal);
+                                console.log(`[DEBUG] Sygnał przekazany do ${peerId}`);
+                            } catch (signalError) {
+                                console.error(`[BŁĄD] Problem podczas przekazywania sygnału: ${signalError.message}`);
+                            }
                         } else {
                             console.warn(`[OSTRZEŻENIE] Nie można przetworzyć sygnału dla ${peerId} - brak połączenia`);
                         }
@@ -199,6 +223,10 @@ class SendItClient {
             { urls: 'stun:stun2.l.google.com:19302' },
             { urls: 'stun:stun3.l.google.com:19302' },
             { urls: 'stun:stun4.l.google.com:19302' },
+            // Dodane więcej publicznych serwerów STUN
+            { urls: 'stun:stun.ekiga.net' },
+            { urls: 'stun:stun.ideasip.com' },
+            { urls: 'stun:stun.schlund.de' },
             {
                 urls: 'turn:numb.viagenie.ca',
                 username: 'webrtc@live.com',
@@ -287,6 +315,7 @@ class SendItClient {
             
             // Oznacz, że rozpoczęto łączenie
             this.isConnecting[targetPeerId] = true;
+            this.connectionStates[targetPeerId] = 'connecting';
             
             // Pobierz konfigurację ICE serwerów
             const iceServers = await this.getIceServers();
@@ -309,8 +338,17 @@ class SendItClient {
                     iceTransportPolicy: 'all',
                     sdpSemantics: 'unified-plan',
                     iceCandidatePoolSize: 10,
-                    bundlePolicy: 'max-bundle'
+                    bundlePolicy: 'max-bundle',
+                    // Dodane do szybszego nawiązywania połączenia
+                    rtcpMuxPolicy: 'require',
+                    // Dodane parametry ICE
+                    iceServers: iceServers,
+                    // Agresywniejsza konfiguracja negocjacji ICE
+                    iceTransportPolicy: 'all'
                 },
+                // Konfiguracja czasów oczekiwania i ponownych prób
+                reconnectTimer: 3000,
+                iceCompleteTimeout: 5000,
                 offerOptions: {
                     offerToReceiveAudio: false,
                     offerToReceiveVideo: false
@@ -341,6 +379,9 @@ class SendItClient {
             let iceGatheringState = null;
             let signalingState = null;
             
+            // Śledzenie czasu nawiązywania połączenia
+            const connectionStartTime = Date.now();
+            
             // Obsługa sygnałów WebRTC
             peer.on('signal', (data) => {
                 console.log(`[DEBUG] Wysyłanie sygnału do ${targetPeerId}: typ=${data.type || 'candidate'}`);
@@ -370,6 +411,8 @@ class SendItClient {
                     console.error(`[BŁĄD] Signaling state: ${peer._pc.signalingState}`);
                 }
                 
+                this.connectionStates[targetPeerId] = 'error';
+                
                 // Decyzja o przełączeniu na awaryjne serwery ICE
                 if (!this.useFallbackIceServers && 
                     (err.message.includes('ICE') || 
@@ -395,6 +438,7 @@ class SendItClient {
                                 this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia nawet z awaryjnymi serwerami.');
                             }
                             delete this.isConnecting[targetPeerId];
+                            this.connectionStates[targetPeerId] = 'failed';
                         });
                     }, 1000);
                     
@@ -418,6 +462,7 @@ class SendItClient {
                                 this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia po kilku próbach.');
                             }
                             delete this.isConnecting[targetPeerId];
+                            this.connectionStates[targetPeerId] = 'failed';
                         });
                     }, 1000);
                 } else {
@@ -425,6 +470,7 @@ class SendItClient {
                     console.error(`[BŁĄD] Wyczerpano ${this.maxConnectionRetries} prób połączenia z ${targetPeerId}`);
                     this.connectionRetryCount = 0;
                     delete this.isConnecting[targetPeerId];
+                    this.connectionStates[targetPeerId] = 'failed';
                     if (this.onTransferError) {
                         this.onTransferError(targetPeerId, err.message);
                     }
@@ -433,7 +479,9 @@ class SendItClient {
             
             // Obsługa nawiązania połączenia
             peer.on('connect', () => {
-                console.log(`[DEBUG] Pomyślnie połączono z peerem: ${targetPeerId}`);
+                const connectionTime = Date.now() - connectionStartTime;
+                console.log(`[DEBUG] Pomyślnie połączono z peerem: ${targetPeerId} (czas: ${connectionTime}ms)`);
+                
                 // Resetuj licznik prób po udanym połączeniu
                 this.connectionRetryCount = 0;
                 
@@ -444,19 +492,27 @@ class SendItClient {
                 }
                 
                 delete this.isConnecting[targetPeerId]; // Usuń znacznik nawiązywania połączenia
+                this.connectionStates[targetPeerId] = 'connected'; // Ustaw stan połączenia
             });
             
             // Obsługa przychodzących danych
             peer.on('data', (data) => {
-                // Debug: raportuj rozmiar otrzymanych danych
-                const size = data.byteLength || data.length || (data.size ? data.size : 'nieznany');
-                console.log(`[DEBUG] Otrzymano dane od ${targetPeerId}, rozmiar: ${size} bajtów`);
-                this.handleIncomingData(targetPeerId, data);
+                try {
+                    // Debug: raportuj rozmiar otrzymanych danych
+                    const size = data.byteLength || data.length || (data.size ? data.size : 'nieznany');
+                    console.log(`[DEBUG] Otrzymano dane od ${targetPeerId}, rozmiar: ${size} bajtów`);
+                    
+                    // Użyj metody handleIncomingData do przetwarzania danych
+                    this.handleIncomingData(targetPeerId, data);
+                } catch (dataError) {
+                    console.error(`[BŁĄD] Problem podczas obsługi otrzymanych danych: ${dataError.message}`);
+                }
             });
             
             // Obsługa zamknięcia połączenia
             peer.on('close', () => {
                 console.log(`[DEBUG] Zamknięto połączenie z peerem: ${targetPeerId}`);
+                delete this.connectionStates[targetPeerId];
                 this.cleanupConnection(targetPeerId);
             });
             
@@ -465,29 +521,99 @@ class SendItClient {
                 iceConnectionState = state;
                 console.log(`[DEBUG] Zmiana stanu ICE dla ${targetPeerId}: ${state}`);
                 
-                // Jeśli stan ICE to 'failed', oznacza to problem z połączeniem
-                if (state === 'failed') {
-                    console.error(`[BŁĄD] Połączenie ICE nie powiodło się dla ${targetPeerId}`);
-                    
-                    // Oznacz tego peera jako problematycznego
-                    this.iceFailedPeers.add(targetPeerId);
-                    
-                    if (this.onTransferError) {
-                        this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia ICE. Spróbuj ponownie później.');
-                    }
-                }
-                
-                // Jeśli połączenie przeszło do stanu connected, możemy zresetować flagi
-                if (state === 'connected' || state === 'completed') {
-                    this.iceFailedPeers.delete(targetPeerId);
+                // Obsługa różnych stanów ICE
+                switch (state) {
+                    case 'checking':
+                        console.log(`[DEBUG] Sprawdzanie kandydatów ICE dla ${targetPeerId}`);
+                        break;
+                        
+                    case 'connected':
+                    case 'completed':
+                        console.log(`[DEBUG] Połączenie ICE nawiązane dla ${targetPeerId}`);
+                        this.iceFailedPeers.delete(targetPeerId);
+                        
+                        // Ustaw połączenie jako gotowe do użycia, nawet jeśli jeszcze nie otrzymaliśmy zdarzenia 'connect'
+                        if (this.connectionStates[targetPeerId] !== 'connected') {
+                            this.connectionStates[targetPeerId] = 'connected';
+                            delete this.isConnecting[targetPeerId];
+                        }
+                        break;
+                        
+                    case 'failed':
+                        console.error(`[BŁĄD] Połączenie ICE nie powiodło się dla ${targetPeerId}`);
+                        this.iceFailedPeers.add(targetPeerId);
+                        this.connectionStates[targetPeerId] = 'failed';
+                        
+                        if (this.onTransferError) {
+                            this.onTransferError(targetPeerId, 'Nie udało się nawiązać połączenia ICE. Spróbuj ponownie później.');
+                        }
+                        break;
+                        
+                    case 'disconnected':
+                        console.warn(`[OSTRZEŻENIE] Połączenie ICE rozłączone dla ${targetPeerId}`);
+                        this.connectionStates[targetPeerId] = 'disconnected';
+                        break;
+                        
+                    case 'closed':
+                        console.log(`[DEBUG] Połączenie ICE zamknięte dla ${targetPeerId}`);
+                        delete this.connectionStates[targetPeerId];
+                        break;
                 }
             });
             
             // Dodatkowe monitorowanie jeśli peer udostępnia te informacje
             if (peer._pc) {
+                // Bezpośrednie monitorowanie stanu RTCPeerConnection
+                const monitorConnectionState = () => {
+                    try {
+                        if (!peer._pc) return;
+                        
+                        const pc = peer._pc;
+                        
+                        iceGatheringState = pc.iceGatheringState;
+                        signalingState = pc.signalingState;
+                        
+                        console.log(`[DEBUG] Stan połączenia dla ${targetPeerId}:`, {
+                            connectionState: pc.connectionState,
+                            iceConnectionState: pc.iceConnectionState,
+                            iceGatheringState: pc.iceGatheringState,
+                            signalingState: pc.signalingState
+                        });
+                        
+                        // Obsługa stanu połączenia WebRTC
+                        if (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected') {
+                            this.connectionStates[targetPeerId] = 'connected';
+                            delete this.isConnecting[targetPeerId];
+                        }
+                        
+                        // Kontynuuj monitorowanie co 2 sekundy, jeśli połączenie nadal istnieje
+                        if (this.activeConnections[targetPeerId]) {
+                            setTimeout(monitorConnectionState, 2000);
+                        }
+                    } catch (e) {
+                        console.error(`[BŁĄD] Problem podczas monitorowania stanu połączenia: ${e.message}`);
+                    }
+                };
+                
+                // Rozpocznij monitorowanie
+                monitorConnectionState();
+                
+                // Dodaj obserwatory zdarzeń
                 peer._pc.addEventListener('icegatheringstatechange', () => {
                     iceGatheringState = peer._pc.iceGatheringState;
                     console.log(`[DEBUG] Zmiana stanu zbierania ICE dla ${targetPeerId}: ${peer._pc.iceGatheringState}`);
+                    
+                    // Gdy zbieranie kandydatów jest zakończone, możemy zacząć używać połączenia
+                    // nawet jeśli jeszcze nie otrzymaliśmy zdarzenia 'connect'
+                    if (peer._pc.iceGatheringState === 'complete' && this.earlyMessageEnabled) {
+                        // Poczekaj dodatkowy moment przed ustaleniem połączenia jako gotowe
+                        setTimeout(() => {
+                            if (this.activeConnections[targetPeerId] && this.isConnecting[targetPeerId]) {
+                                console.log(`[DEBUG] Zbieranie ICE zakończone dla ${targetPeerId}, oznaczanie połączenia jako wstępnie gotowe`);
+                                this.connectionStates[targetPeerId] = 'early_ready';
+                            }
+                        }, 1000);
+                    }
                 });
                 
                 peer._pc.addEventListener('signalingstatechange', () => {
@@ -498,12 +624,22 @@ class SendItClient {
                 peer._pc.addEventListener('connectionstatechange', () => {
                     console.log(`[DEBUG] Zmiana stanu połączenia dla ${targetPeerId}: ${peer._pc.connectionState}`);
                     
-                    // Reaguj na stan "failed" lub "disconnected"
-                    if (peer._pc.connectionState === 'failed' || peer._pc.connectionState === 'disconnected') {
-                        console.error(`[BŁĄD] Połączenie WebRTC ${peer._pc.connectionState} dla ${targetPeerId}`);
-                        if (this.onTransferError) {
-                            this.onTransferError(targetPeerId, `Połączenie WebRTC ${peer._pc.connectionState}`);
-                        }
+                    // Obsługa zmiany stanu połączenia
+                    switch (peer._pc.connectionState) {
+                        case 'connected':
+                            this.connectionStates[targetPeerId] = 'connected';
+                            delete this.isConnecting[targetPeerId];
+                            break;
+                            
+                        case 'failed':
+                        case 'disconnected':
+                            console.error(`[BŁĄD] Połączenie WebRTC ${peer._pc.connectionState} dla ${targetPeerId}`);
+                            this.connectionStates[targetPeerId] = peer._pc.connectionState;
+                            
+                            if (this.onTransferError) {
+                                this.onTransferError(targetPeerId, `Połączenie WebRTC ${peer._pc.connectionState}`);
+                            }
+                            break;
                     }
                 });
                 
@@ -511,18 +647,55 @@ class SendItClient {
                 peer._pc.onicecandidate = (event) => {
                     if (event.candidate) {
                         console.log(`[DEBUG] Nowy kandydat ICE dla ${targetPeerId}:`, 
-                            event.candidate.candidate || 'brak szczegółów');
+                            event.candidate.candidate || 'brak szczegółów',
+                            `typ: ${event.candidate.type || 'nieznany'}`, 
+                            `protokół: ${event.candidate.protocol || 'nieznany'}`);
                     }
                 };
             }
             
             // Ustaw połączenie jako aktywne
             this.activeConnections[targetPeerId] = peer;
+            
+            // Timeout dla połączenia ICE, aby uniknąć zawieszenia
+            const iceTimeoutTimer = setTimeout(() => {
+                if (this.isConnecting[targetPeerId] && this.connectionStates[targetPeerId] !== 'connected') {
+                    console.log(`[DEBUG] Timeout zbierania kandydatów ICE dla ${targetPeerId}, przechodzę do trybu wczesnej komunikacji`);
+                    
+                    // Jeśli włączona jest opcja wczesnej komunikacji, oznacz połączenie jako gotowe do użycia
+                    if (this.earlyMessageEnabled) {
+                        this.connectionStates[targetPeerId] = 'early_ready';
+                    }
+                }
+            }, this.iceTimeout);
+            
+            // Główny timeout całego połączenia
+            const connectionTimeoutTimer = setTimeout(() => {
+                if (this.isConnecting[targetPeerId] && this.connectionStates[targetPeerId] !== 'connected') {
+                    console.error(`[BŁĄD] Przekroczono całkowity czas oczekiwania na połączenie z ${targetPeerId}`);
+                    this.connectionStates[targetPeerId] = 'timeout';
+                    
+                    if (this.onTransferError) {
+                        this.onTransferError(targetPeerId, 'Przekroczono czas oczekiwania na połączenie');
+                    }
+                    
+                    this.cleanupConnection(targetPeerId, peer);
+                }
+            }, this.connectionTimeout);
+            
+            // Czyszczenie timerów przy sukcesie połączenia
+            peer.once('connect', () => {
+                clearTimeout(iceTimeoutTimer);
+                clearTimeout(connectionTimeoutTimer);
+            });
+            
             return peer;
             
         } catch (error) {
             console.error(`[BŁĄD] Błąd podczas tworzenia połączenia peer z ${targetPeerId}:`, error);
             delete this.isConnecting[targetPeerId]; // Usuń znacznik nawiązywania połączenia
+            this.connectionStates[targetPeerId] = 'error';
+            
             if (this.onTransferError) {
                 this.onTransferError(targetPeerId, `Błąd konfiguracji: ${error.message}`);
             }
@@ -547,11 +720,20 @@ class SendItClient {
         delete this.activeConnections[targetPeerId];
     }
 
-    // Sprawdzenie czy połączenie jest gotowe
+    // Sprawdzenie czy połączenie jest gotowe do wysyłania wiadomości
     isConnectionReady(targetPeerId) {
-        return !!(this.activeConnections[targetPeerId] && 
+        // Standardowa kontrola połączenia
+        const isStandardReady = !!(this.activeConnections[targetPeerId] && 
                  !this.isConnecting[targetPeerId] &&
                  this.activeConnections[targetPeerId]._connected);
+        
+        // Sprawdzenie stanu z naszego śledzenia
+        const connectionState = this.connectionStates[targetPeerId];
+        
+        // Albo standardowe połączenie jest gotowe, albo mamy stan 'connected' lub 'early_ready'
+        return isStandardReady || 
+               connectionState === 'connected' || 
+               (this.earlyMessageEnabled && connectionState === 'early_ready');
     }
 
     // Wysłanie żądania transferu plików
@@ -584,12 +766,35 @@ class SendItClient {
                 await new Promise((resolve, reject) => {
                     let connectionTimeout;
                     
+                    // Funkcja sprawdzająca stan połączenia co 500ms
+                    const checkConnection = () => {
+                        // Sprawdź czy połączenie zostało przerwane
+                        if (!this.activeConnections[targetPeerId]) {
+                            clearTimeout(connectionTimeout);
+                            reject(new Error('Połączenie zostało zamknięte'));
+                            return;
+                        }
+                        
+                        // Sprawdź czy połączenie jest gotowe
+                        if (this.isConnectionReady(targetPeerId)) {
+                            clearTimeout(connectionTimeout);
+                            console.log(`[DEBUG] Połączenie z ${targetPeerId} gotowe do użycia (stan: ${this.connectionStates[targetPeerId]})`);
+                            resolve();
+                            return;
+                        }
+                        
+                        // Sprawdź stan połączenia co 500ms
+                        setTimeout(checkConnection, 500);
+                    };
+                    
                     // Funkcja obsługi połączenia
                     const connectHandler = () => {
                         console.log(`[DEBUG] Pomyślnie nawiązano połączenie z ${targetPeerId}`);
                         clearTimeout(connectionTimeout);
-                        connection.removeListener('connect', connectHandler);
-                        connection.removeListener('error', errorHandler);
+                        if (connection.removeListener) {
+                            connection.removeListener('connect', connectHandler);
+                            connection.removeListener('error', errorHandler);
+                        }
                         resolve();
                     };
                     
@@ -597,22 +802,38 @@ class SendItClient {
                     const errorHandler = (err) => {
                         console.error(`[BŁĄD] Błąd podczas nawiązywania połączenia z ${targetPeerId}:`, err);
                         clearTimeout(connectionTimeout);
-                        connection.removeListener('connect', connectHandler);
-                        connection.removeListener('error', errorHandler);
+                        if (connection.removeListener) {
+                            connection.removeListener('connect', connectHandler);
+                            connection.removeListener('error', errorHandler);
+                        }
                         reject(err);
                     };
                     
                     // Ustaw timeout
                     connectionTimeout = setTimeout(() => {
                         console.error(`[BŁĄD] Przekroczono czas oczekiwania na połączenie z ${targetPeerId}`);
-                        connection.removeListener('connect', connectHandler);
-                        connection.removeListener('error', errorHandler);
-                        reject(new Error('Przekroczono czas oczekiwania na połączenie'));
-                    }, this.connectionTimeout); // Używamy zdefiniowanego timeout
+                        if (connection.removeListener) {
+                            connection.removeListener('connect', connectHandler);
+                            connection.removeListener('error', errorHandler);
+                        }
+                        
+                        // Sprawdź, czy mamy połączenie w trybie wczesnej komunikacji
+                        if (this.earlyMessageEnabled && this.connectionStates[targetPeerId] === 'early_ready') {
+                            console.log(`[DEBUG] Używanie wczesnego trybu komunikacji dla ${targetPeerId}`);
+                            resolve(); // Kontynuuj mimo braku pełnego połączenia
+                        } else {
+                            reject(new Error('Przekroczono czas oczekiwania na połączenie'));
+                        }
+                    }, this.connectionTimeout);
                     
-                    // Dodaj obserwatory zdarzeń
-                    connection.once('connect', connectHandler);
-                    connection.once('error', errorHandler);
+                    // Rozpocznij sprawdzanie połączenia
+                    checkConnection();
+                    
+                    // Dodaj obserwatory zdarzeń, jeśli dostępne
+                    if (connection.once) {
+                        connection.once('connect', connectHandler);
+                        connection.once('error', errorHandler);
+                    }
                 });
             }
             
@@ -640,12 +861,17 @@ class SendItClient {
             try {
                 // Wyślij żądanie transferu plików
                 console.log(`[DEBUG] Wysyłanie żądania transferu do ${targetPeerId}`);
-                connection.send(JSON.stringify({
+                
+                const requestData = {
                     type: 'request-transfer',
                     files: filesMetadata,
                     totalSize: totalSize,
                     senderName: this.deviceName
-                }));
+                };
+                
+                console.log(`[DEBUG] Dane żądania:`, requestData);
+                
+                connection.send(JSON.stringify(requestData));
                 
                 console.log(`[DEBUG] Pomyślnie wysłano żądanie transferu plików do ${targetPeerId}`);
                 
@@ -655,7 +881,7 @@ class SendItClient {
                     timestamp: Date.now()
                 };
                 
-                // Rozpocznij timeout dla oczekiwania na odpowiedź (30 sekund)
+                // Rozpocznij timeout dla oczekiwania na odpowiedź (60 sekund)
                 setTimeout(() => {
                     if (this.pendingTransfers[targetPeerId]) {
                         console.log(`[DEBUG] Timeout oczekiwania na odpowiedź od ${targetPeerId}`);
@@ -664,7 +890,7 @@ class SendItClient {
                             this.onTransferError(targetPeerId, 'Nie otrzymano odpowiedzi na żądanie transferu');
                         }
                     }
-                }, 30000);
+                }, 60000); // Zwiększony timeout
                 
                 return true;
             } catch (error) {
@@ -684,7 +910,14 @@ class SendItClient {
     respondToTransferRequest(peerId, accepted) {
         try {
             if (!this.isConnectionReady(peerId)) {
-                throw new Error('Brak aktywnego połączenia z peerem');
+                console.warn(`[OSTRZEŻENIE] Próba odpowiedzi na żądanie transferu bez gotowego połączenia (stan: ${this.connectionStates[peerId]})`);
+                
+                // Jeśli połączenie nie jest w pełni gotowe, ale mamy wczesne połączenie, spróbujmy mimo to
+                if (!this.earlyMessageEnabled || 
+                    (this.connectionStates[peerId] !== 'early_ready' && 
+                     this.connectionStates[peerId] !== 'connected')) {
+                    throw new Error('Brak aktywnego połączenia z peerem');
+                }
             }
             
             const connection = this.activeConnections[peerId];
@@ -751,7 +984,7 @@ class SendItClient {
                     await new Promise((resolve, reject) => {
                         const timeout = setTimeout(() => {
                             reject(new Error('Timeout ponownego łączenia'));
-                        }, 10000);
+                        }, 30000); // Dłuższy czas oczekiwania
                         
                         const checkConnection = () => {
                             if (this.isConnectionReady(peerId)) {
@@ -805,8 +1038,8 @@ class SendItClient {
                     type: file.type
                 }));
                 
-                // Dodaj krótkie opóźnienie, aby upewnić się, że wiadomość start-file dotrze przed fragmentami
-                await new Promise(resolve => setTimeout(resolve, 500));
+                // Dodaj dłuższe opóźnienie, aby upewnić się, że wiadomość start-file dotrze przed fragmentami
+                await new Promise(resolve => setTimeout(resolve, 1000));
                 console.log(`[DEBUG] Rozpoczynam wysyłanie fragmentów pliku do ${peerId}`);
                 
             } catch (error) {
@@ -901,7 +1134,7 @@ class SendItClient {
                             }
                             
                             if (offset < file.size) {
-                                // Małe opóźnienie między fragmentami dla lepszej stabilności
+                                // Dodajemy opóźnienie między wysyłaniem fragmentów - kluczowe dla stabilności
                                 setTimeout(readNextChunk, 10);
                             } else {
                                 finishTransfer();
@@ -912,8 +1145,8 @@ class SendItClient {
                         }
                     };
                     
-                    // Wysyłamy od razu, ale możemy dodać opóźnienie, jeśli są problemy ze stabilnością
-                    sendChunk();
+                    // Wysyłamy z małym opóźnieniem dla lepszej stabilności
+                    setTimeout(sendChunk, 5);
                     
                 } catch (error) {
                     console.error(`[BŁĄD] Błąd podczas wysyłania danych: ${error.message}`);
@@ -927,7 +1160,7 @@ class SendItClient {
             const finishTransfer = () => {
                 console.log(`[DEBUG] Transfer pliku "${file.name}" zakończony, wysyłanie sygnału końca pliku`);
                 
-                // Zakończenie transferu tego pliku z krótkim opóźnieniem
+                // Zakończenie transferu tego pliku z dłuższym opóźnieniem
                 // aby upewnić się, że wszystkie fragmenty dotarły
                 setTimeout(() => {
                     try {
@@ -935,6 +1168,8 @@ class SendItClient {
                             type: 'end-file',
                             name: file.name
                         }));
+                        
+                        console.log(`[DEBUG] Sygnał końca pliku wysłany do ${peerId}`);
                         
                         if (this.onTransferComplete) {
                             this.onTransferComplete(peerId, file);
@@ -949,7 +1184,7 @@ class SendItClient {
                         }
                         this.processNextTransfer();
                     }
-                }, 500); // Zwiększone opóźnienie dla lepszej niezawodności
+                }, 1000); // Zwiększone opóźnienie dla lepszej niezawodności
             };
             
             reader.onerror = (error) => {
@@ -1085,17 +1320,20 @@ class SendItClient {
                 switch (message.type) {
                     case 'request-transfer':
                         // Otrzymano żądanie transferu plików
-                        console.log(`[DEBUG] Otrzymano żądanie transferu ${message.files.length} plików od ${peerId}`);
+                        console.log(`[DEBUG] Otrzymano żądanie transferu ${message.files?.length || 0} plików od ${peerId}`);
+                        console.log(`[DEBUG] Szczegóły żądania:`, message);
                         
                         const peerName = this.peers[peerId]?.name || "Nieznane urządzenie";
                         
                         // Powiadom UI o żądaniu transferu
                         if (this.onTransferRequest) {
                             this.onTransferRequest(peerId, {
-                                files: message.files,
-                                totalSize: message.totalSize,
+                                files: message.files || [],
+                                totalSize: message.totalSize || 0,
                                 senderName: message.senderName || peerName
                             });
+                        } else {
+                            console.error(`[BŁĄD] Brak obsługi żądania transferu (onTransferRequest)`);
                         }
                         break;
                         
@@ -1133,15 +1371,24 @@ class SendItClient {
                                 return;
                             }
                             
-                            connection.send(JSON.stringify({
-                                type: 'metadata',
-                                files: filesMetadata
-                            }));
-                            
-                            // Rozpocznij transfer, jeśli nie jest aktywny
-                            if (!this.currentTransfer) {
-                                console.log(`[DEBUG] Rozpoczynam przetwarzanie kolejki transferu dla ${peerId}`);
-                                this.processNextTransfer();
+                            try {
+                                connection.send(JSON.stringify({
+                                    type: 'metadata',
+                                    files: filesMetadata
+                                }));
+                                
+                                console.log(`[DEBUG] Wysłano metadane plików do ${peerId}`);
+                                
+                                // Krótka pauza przed rozpoczęciem transferu
+                                setTimeout(() => {
+                                    // Rozpocznij transfer, jeśli nie jest aktywny
+                                    if (!this.currentTransfer) {
+                                        console.log(`[DEBUG] Rozpoczynam przetwarzanie kolejki transferu dla ${peerId}`);
+                                        this.processNextTransfer();
+                                    }
+                                }, 500);
+                            } catch (metaError) {
+                                console.error(`[BŁĄD] Problem podczas wysyłania metadanych: ${metaError.message}`);
                             }
                         } else {
                             console.warn(`[OSTRZEŻENIE] Otrzymano akceptację transferu, ale nie ma oczekujących plików dla ${peerId}`);
@@ -1178,10 +1425,10 @@ class SendItClient {
                         
                     case 'metadata':
                         // Otrzymano informacje o plikach, które będą przesłane
-                        console.log(`[DEBUG] Początek odbierania ${message.files.length} plików od ${peerId}`);
-                        console.log(`[DEBUG] Szczegóły plików:`, JSON.stringify(message.files));
+                        console.log(`[DEBUG] Początek odbierania ${message.files?.length || 0} plików od ${peerId}`);
+                        console.log(`[DEBUG] Szczegóły plików:`, JSON.stringify(message.files || []));
                         
-                        this.incomingFiles = message.files;
+                        this.incomingFiles = message.files || [];
                         this.receivedFiles = [];
                         break;
                         
@@ -1298,6 +1545,7 @@ class SendItClient {
         this.isConnecting = {};
         this.pendingTransfers = {};
         this.iceFailedPeers.clear();
+        this.connectionStates = {};
         
         if (this.socket) {
             this.socket.disconnect();
