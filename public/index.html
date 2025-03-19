@@ -1658,7 +1658,7 @@
                         <ul>
                             <li>Socket.IO połączony: ${results.connectionTests.socketConnection ? '✅' : '❌'}</li>
                             <li>Czas pobierania konfiguracji ICE: ${results.connectionTests.timeToConnect || 'N/A'} ms</li>
-                            <li>ID sieci: ${results.networkInfo.networkId || 'N/A'}</li>
+                            <li>Adres IP: ${results.networkInfo.ip || 'N/A'}</li>
                         </ul>
                         
                         <h4>Serwery ICE (${results.iceServers.length || 0}):</h4>
@@ -1925,11 +1925,14 @@
                 await client.init();
                 client.registerDevice(deviceName);
                 
-                // Włącz tryb wczesnej komunikacji dla lepszej niezawodności
-                client.earlyMessageEnabled = true;
+                // Włącz tryb UDP hole punching dla lepszej komunikacji globalnej
+                client.udpHolePunchingEnabled = true;
                 
-                connectionStatus.textContent = 'Połączono z siecią';
-                showToast('Połączono', 'Połączono z siecią SendIt', 'success');
+                connectionStatus.textContent = 'Połączono z siecią globalną';
+                showToast('Połączono', 'Połączono z globalną siecią SendIt', 'success');
+                
+                // Dodaj informację o globalnym dostępie
+                deviceTypeLabel.innerHTML = '<i class="fas fa-globe"></i> Urządzenie globalne';
                 
                 // Obsługa aktualizacji listy urządzeń
                 client.onPeersUpdated = (peers) => {

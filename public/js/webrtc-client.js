@@ -8,7 +8,6 @@ class SendItClient {
         this.socket = null;
         this.peerId = null;
         this.deviceName = null;
-        this.networkId = null;
         
         // Listy i kolekcje urządzeń i połączeń
         this.peers = {};  // Lista wykrytych urządzeń
@@ -54,6 +53,11 @@ class SendItClient {
         
         // Ostatnio otrzymany nagłówek fragmentu
         this.lastChunkHeader = null;
+        
+        // Ustawienia UDP hole punching
+        this.udpHolePunchingEnabled = true;  // Włącz technikę UDP hole punching
+        this.punchingInterval = 500;        // Interwał wysyłania pakietów keepalive (ms)
+        this.punchingDuration = 10000;     // Czas trwania procedury hole punching (ms)
     }
 
     /**
@@ -185,9 +189,15 @@ class SendItClient {
      * @param {string} name - Nazwa urządzenia
      */
     registerDevice(name) {
+        if (!this.socket || !this.socket.connected) {
+            console.error('[BŁĄD] Nie można zarejestrować urządzenia - brak połączenia z serwerem');
+            return;
+        }
+        
         this.deviceName = name;
+        
         console.log(`[DEBUG] Rejestracja urządzenia: ${name}`);
-        this.socket.emit('register-name', name);
+        this.socket.emit('register-device', name);
     }
 
     /**
@@ -319,19 +329,19 @@ class SendItClient {
     }
 
     /**
-     * Pobieranie konfiguracji serwerów ICE (STUN/TURN)
+     * Pobieranie konfiguracji serwerów ICE (STUN)
      * @returns {Promise<Array>} - Lista serwerów ICE
      */
     async getIceServers() {
         try {
-            console.log('[DEBUG] Pobieranie serwerów ICE z serwera...');
+            console.log('[DEBUG] Pobieranie serwerów STUN z serwera...');
             const startTime = Date.now();
             
             // Daj możliwość przerwania długotrwałego żądania
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
             
-            const response = await fetch('/api/turn-credentials', {
+            const response = await fetch('/api/ice-servers', {
                 method: 'GET',
                 headers: {
                     'Accept': 'application/json',
@@ -344,38 +354,27 @@ class SendItClient {
             clearTimeout(timeoutId);
             
             const responseTime = Date.now() - startTime;
-            console.log(`[DEBUG] Otrzymano odpowiedź z serwera TURN w ${responseTime}ms`);
+            console.log(`[DEBUG] Otrzymano odpowiedź z serwera w ${responseTime}ms`);
             
             if (!response.ok) {
                 console.warn(`[OSTRZEŻENIE] Serwer zwrócił kod ${response.status}`);
-                return this.getFallbackIceServers();
+                return this.getPublicStunServers();
             }
             
             const data = await response.json();
             
             if (!Array.isArray(data) || data.length === 0) {
-                console.warn('[OSTRZEŻENIE] Otrzymano nieprawidłowe dane z serwera TURN');
-                return this.getFallbackIceServers();
+                console.warn('[OSTRZEŻENIE] Otrzymano nieprawidłowe dane z serwera');
+                return this.getPublicStunServers();
             }
             
-            console.log(`[DEBUG] Pobrano ${data.length} serwerów ICE`);
+            console.log(`[DEBUG] Pobrano ${data.length} serwerów STUN`);
             
-            return this.enhanceIceServers(data);
+            return data;
         } catch (error) {
-            console.error(`[BŁĄD] Błąd podczas pobierania serwerów ICE: ${error.message}`);
-            return this.getFallbackIceServers();
+            console.error(`[BŁĄD] Błąd podczas pobierania serwerów STUN: ${error.message}`);
+            return this.getPublicStunServers();
         }
-    }
-
-    /**
-     * Dodaje dodatkowe serwery STUN do konfiguracji ICE
-     * @param {Array} servers - Lista serwerów ICE
-     * @returns {Array} - Rozszerzona lista serwerów ICE
-     */
-    enhanceIceServers(servers) {
-        // Dodaj publiczne serwery STUN dla zwiększenia niezawodności
-        const enhancedServers = [...servers, ...this.getPublicStunServers()];
-        return enhancedServers;
     }
 
     /**
@@ -389,43 +388,14 @@ class SendItClient {
             { urls: 'stun:stun2.l.google.com:19302' },
             { urls: 'stun:stun3.l.google.com:19302' },
             { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:stun.stunprotocol.org:3478' },
+            { urls: 'stun:stun.voiparound.com' },
+            { urls: 'stun:stun.voipbuster.com' },
+            { urls: 'stun:stun.voipstunt.com' },
+            { urls: 'stun:stun.voxgratia.org' },
             { urls: 'stun:stun.ekiga.net' },
             { urls: 'stun:stun.ideasip.com' },
             { urls: 'stun:stun.schlund.de' }
-        ];
-    }
-
-    /**
-     * Zwraca awaryjne serwery ICE w przypadku problemu z pobraniem z serwera
-     * @returns {Array} - Lista serwerów ICE
-     */
-    getFallbackIceServers() {
-        console.log('[DEBUG] Używam awaryjnych, statycznych serwerów ICE');
-        return [
-            {
-                urls: "stun:stun.relay.metered.ca:80"
-            },
-            {
-                urls: "turn:global.relay.metered.ca:80",
-                username: "041533025c7ee2fd11afa46e",
-                credential: "NmredoIjnB5jEIWP"
-            },
-            {
-                urls: "turn:global.relay.metered.ca:80?transport=tcp",
-                username: "041533025c7ee2fd11afa46e",
-                credential: "NmredoIjnB5jEIWP"
-            },
-            {
-                urls: "turn:global.relay.metered.ca:443",
-                username: "041533025c7ee2fd11afa46e",
-                credential: "NmredoIjnB5jEIWP"
-            },
-            {
-                urls: "turns:global.relay.metered.ca:443?transport=tcp",
-                username: "041533025c7ee2fd11afa46e",
-                credential: "NmredoIjnB5jEIWP"
-            },
-            ...this.getPublicStunServers()
         ];
     }
 
@@ -481,6 +451,7 @@ class SendItClient {
             
             // Śledzenie stanu połączenia ICE
             let iceConnectionState = null;
+            let startPunchingTime = null;
             
             // Obsługa sygnałów WebRTC
             peer.on('signal', (data) => {
@@ -502,6 +473,12 @@ class SendItClient {
                     this.updateConnectionState(targetPeerId, 'error', { 
                         error: 'Nie można wysłać sygnału - socket jest null lub rozłączony' 
                     });
+                }
+                
+                // Jeśli to kandydat ICE i UDP hole punching jest włączone, rozpocznij procedurę
+                if (this.udpHolePunchingEnabled && (data.candidate || data.candidate === '') && !startPunchingTime) {
+                    startPunchingTime = Date.now();
+                    this.startUdpHolePunching(peer, targetPeerId);
                 }
             });
             
@@ -2462,5 +2439,48 @@ class SendItClient {
         else if (bytes < 1048576) return (bytes / 1024).toFixed(2) + ' KB';
         else if (bytes < 1073741824) return (bytes / 1048576).toFixed(2) + ' MB';
         else return (bytes / 1073741824).toFixed(2) + ' GB';
+    }
+
+    /**
+     * Rozpoczęcie procedury UDP hole punching
+     * @param {SimplePeer} peer - Obiekt SimplePeer
+     * @param {string} targetPeerId - ID peera docelowego
+     */
+    startUdpHolePunching(peer, targetPeerId) {
+        console.log(`[DEBUG] Rozpoczęcie procedury UDP hole punching dla ${targetPeerId}`);
+        
+        // Zmienna do śledzenia, czy połączenie zostało już nawiązane
+        let connected = false;
+        
+        // Nasłuchuj na wydarzenie 'connect'
+        peer.once('connect', () => {
+            connected = true;
+            console.log(`[DEBUG] UDP hole punching zakończony sukcesem dla ${targetPeerId}`);
+        });
+        
+        // Funkcja do wysyłania pakietów keepalive, aby utrzymać otwarte porty NAT
+        const sendKeepAlive = () => {
+            if (connected) return; // Jeśli już połączono, zatrzymaj
+            
+            try {
+                // Próba wysłania małego pakietu danych, aby utrzymać otwarte porty
+                if (peer && peer._channel && peer._channel.readyState === 'open') {
+                    peer._channel.send(JSON.stringify({ type: 'punch', timestamp: Date.now() }));
+                }
+            } catch (e) {
+                // Ignoruj błędy, to normalne podczas procedury hole punching
+            }
+        };
+        
+        // Rozpocznij wysyłanie pakietów keepalive w regularnych odstępach
+        const intervalId = setInterval(sendKeepAlive, this.punchingInterval);
+        
+        // Zatrzymaj procedurę po określonym czasie
+        setTimeout(() => {
+            clearInterval(intervalId);
+            if (!connected) {
+                console.log(`[DEBUG] UDP hole punching nie powiódł się w czasie ${this.punchingDuration}ms dla ${targetPeerId}`);
+            }
+        }, this.punchingDuration);
     }
 }
